@@ -14,17 +14,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 #v6.0.2
 
-      - name: Start eBPF tracker (stdio mode)
+      # s3 mode writes to /tmp/ebpf-network-events.json; no bucket = post step
+      # prints the file instead of uploading (no pipe-backpressure risk).
+      - name: Start eBPF tracker (file mode)
         uses: skroutz/ebpf-tracker@main
         with:
-          output: stdio
+          output: s3
+          # s3-bucket intentionally omitted — post step will print the file
 
-      - name: Generate TCP traffic (curl)
+      - name: Generate TCP/IPv4 traffic (curl --ipv4)
         run: |
-          curl -sS --max-time 5 https://example.com -o /dev/null
-          curl -sS --max-time 5 https://github.com -o /dev/null
+          # Force IPv4 so fexit/tcp_v4_connect fires rather than tcp_v6_connect.
+          curl --ipv4 -sS --max-time 5 https://example.com -o /dev/null
+          curl --ipv4 -sS --max-time 5 https://github.com -o /dev/null
 
-      - name: Generate UDP traffic (DNS)
+      - name: Generate UDP traffic (dig direct to resolver)
         run: |
+          # @8.8.8.8 uses sendmsg() with a userspace msg_name pointer — exercises
+          # the kernel/user-pointer fallback in fentry/udp_sendmsg.
           dig +short example.com @8.8.8.8
           dig +short github.com @1.1.1.1
+
+      - name: Generate TCP/IPv6 traffic (curl --ipv6)
+        run: |
+          # Exercises fexit/tcp_v6_connect separately.
+          curl --ipv6 -sS --max-time 5 https://example.com -o /dev/null || true
+          curl --ipv6 -sS --max-time 5 https://github.com -o /dev/null || true
+
+      - name: Wait for tracker to flush ring buffer
+        run: sleep 3

@@ -31492,7 +31492,14 @@ async function run() {
   }
 
   if (!s3Bucket) {
-    core.setFailed('S3_BUCKET state is missing; cannot upload logs');
+    core.warning('S3_BUCKET state is missing — printing events file to log instead of uploading');
+    if (fs.existsSync(EVENTS_FILE)) {
+      core.info(`=== captured events (${EVENTS_FILE}) ===`);
+      process.stdout.write(fs.readFileSync(EVENTS_FILE, 'utf8'));
+      core.info('=== end of events ===');
+    } else {
+      core.warning(`${EVENTS_FILE} not found — tracker may not have started or produced no events`);
+    }
     return;
   }
 
