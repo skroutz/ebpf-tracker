@@ -34901,7 +34901,6 @@ async function run() {
     // the tracker's actual PID running as root.
     const sudoersLine =
       'runner ALL=(root) NOPASSWD:NOSETENV: ' + TRACKER_PATH + '\n' +
-      'runner ALL=(root) NOPASSWD: /bin/cat ' + EVENTS_FILE + '\n' +
       'Defaults!' + TRACKER_PATH + ' !use_pty, env_keep += "GITHUB_RUN_ID GITHUB_REPOSITORY GITHUB_WORKFLOW"\n';
     await exec.exec('sudo', ['tee', '/etc/sudoers.d/ebpf-tracker'], {
       input: Buffer.from(sudoersLine),

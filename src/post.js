@@ -73,9 +73,7 @@ async function run() {
     core.warning('S3_BUCKET state is missing — printing events file to log instead of uploading');
     try {
       core.info(`=== captured events (${EVENTS_FILE}) ===`);
-      // File is owned by root (tracker ran as root); read via sudo.
-      const { stdout } = await exec.getExecOutput('sudo', ['cat', EVENTS_FILE], { silent: true });
-      process.stdout.write(stdout);
+      process.stdout.write(fs.readFileSync(EVENTS_FILE, 'utf8'));
       core.info('=== end of events ===');
     } catch (e) {
       core.warning(`Could not read ${EVENTS_FILE}: ${e.message}`);
