@@ -34865,11 +34865,6 @@ async function run() {
 
     const s3Bucket = core.getInput('s3-bucket');
 
-    if (outputMode === 's3' && !s3Bucket) {
-      core.setFailed('s3-bucket input is required when output is "s3"');
-      return;
-    }
-
     core.saveState('OUTPUT_MODE', outputMode);
     core.saveState('S3_BUCKET', s3Bucket);
 
