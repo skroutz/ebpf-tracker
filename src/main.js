@@ -50,18 +50,29 @@ async function run() {
     fs.chmodSync(TRACKER_PATH, 0o755);
     core.info('Tracker binary ready at ' + TRACKER_PATH);
 
-    // In stdio mode the binary writes to stdout, which we capture via a pipe
-    // and forward to the Actions log so it shows up inline in the run.
+    // The tracker must run as root so that monitored code (potentially
+    // malicious third-party actions) cannot kill it. Ubuntu 24.04 enables
+    // use_pty in sudoers by default, which makes sudo fork a child in a new
+    // session — breaking PID tracking. We disable it for this binary only via
+    // a sudoers drop-in, which causes sudo to exec() the binary directly
+    // (replacing its own process image). The PID returned by spawn() is then
+    // the tracker's actual PID running as root.
+    const sudoersLine =
+      'runner ALL=(root) NOPASSWD:NOSETENV: ' + TRACKER_PATH + '\n' +
+      'Defaults!' + TRACKER_PATH + ' !use_pty\n';
+    await exec.exec('sudo', ['tee', '/etc/sudoers.d/ebpf-tracker'], {
+      input: Buffer.from(sudoersLine),
+      silent: true,
+    });
+    await exec.exec('sudo', ['visudo', '-c', '-f', '/etc/sudoers.d/ebpf-tracker']);
+
     const isStdio = outputMode === 'stdio';
     const args = isStdio ? ['--output', '-'] : [];
 
-    // eBPF requires elevated privileges to load programs and raise the memlock
-    // rlimit. GitHub-hosted runners have passwordless sudo.
-    //
     // In stdio mode use 'inherit' so the tracker writes directly to the
-    // runner's stdout/stderr (Actions captures all fd output). Using 'pipe'
-    // would keep the Node.js event loop alive indefinitely via open pipe refs.
-    const child = spawn('sudo', [TRACKER_PATH, ...args], {
+    // runner's stdout/stderr. Using 'pipe' would keep the Node.js event loop
+    // alive indefinitely via open pipe refs.
+    const child = spawn('sudo', ['-n', TRACKER_PATH, ...args], {
       detached: true,
       stdio: isStdio ? ['ignore', 'inherit', 'inherit'] : 'ignore',
     });
