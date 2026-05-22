@@ -19,23 +19,6 @@ jobs:
         with:
           output: stdio
 
-      - name: Debug process tree
-        run: |
-          echo "=== pgrep ebpf-tracker ==="
-          pgrep -a ebpf-tracker || echo "(not found)"
-          echo "=== process tree (pstree -p) ==="
-          pstree -p || true
-          echo "=== /proc entries for ebpf-tracker ==="
-          for pid in $(pgrep ebpf-tracker 2>/dev/null); do
-            echo "--- PID $pid ---"
-            cat /proc/$pid/status 2>/dev/null | grep -E '^(Name|Pid|PPid|Uid|Groups|State)'
-            echo "session id: $(cat /proc/$pid/sessionid 2>/dev/null || awk '/^NSpid/{print $2}' /proc/$pid/status)"
-          done
-          echo "=== sudoers.d/ebpf-tracker ==="
-          cat /etc/sudoers.d/ebpf-tracker || echo "(not found)"
-          echo "=== sudo -V | grep pty ==="
-          sudo -V 2>&1 | grep -i pty || echo "(no pty line)"
-
       - name: Generate TCP traffic (curl)
         run: |
           curl -sS --max-time 5 https://example.com -o /dev/null

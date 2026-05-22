@@ -31464,32 +31464,23 @@ async function run() {
     return;
   }
 
-  // Debug: show the process state before signaling.
-  core.info(`=== DEBUG: process state for PID ${pid} ===`);
+  // sudo(saved_pid) does not forward signals to its children by default.
+  // Signal the entire process group instead (negative PGID = saved sudo PID,
+  // since sudo is the group leader and !use_pty keeps the tracker in the
+  // same group). Both sudo and ebpf-tracker receive the signal.
+  core.info(`Sending SIGTERM to process group ${pid}`);
   try {
-    await exec.exec('sudo', ['cat', `/proc/${pid}/status`], { silent: false });
-  } catch { core.info(`(no /proc/${pid}/status — process already gone)`); }
-  try {
-    await exec.exec('ps', ['-o', 'pid,ppid,pgid,sid,uid,comm', '-p', String(pid)], { silent: false });
-  } catch { core.info(`(ps failed for PID ${pid})`); }
-  core.info(`isAlive(${pid}) = ${isAlive(pid)}`);
-
-  // The tracker runs as root (tamper-resistant). Use sudo kill to signal it.
-  core.info(`Sending SIGTERM to tracker PID ${pid}`);
-  try {
-    await exec.exec('sudo', ['kill', '-TERM', String(pid)]);
-    core.info('sudo kill -TERM succeeded');
+    await exec.exec('sudo', ['kill', '-TERM', '--', String(-pid)]);
   } catch (err) {
-    core.warning(`Could not signal PID ${pid}: ${err.message}`);
+    core.warning(`Could not signal process group ${pid}: ${err.message}`);
   }
 
   // Poll for exit; escalate to SIGKILL if the process hasn't stopped in time.
   const exited = await waitForExit(pid);
-  core.info(`=== DEBUG: waitForExit result: ${exited} ===`);
   if (!exited) {
     core.warning(`Tracker did not exit within ${SHUTDOWN_TIMEOUT_MS}ms; sending SIGKILL`);
     try {
-      await exec.exec('sudo', ['kill', '-KILL', String(pid)]);
+      await exec.exec('sudo', ['kill', '-KILL', '--', String(-pid)]);
     } catch {
       // Already gone — that is fine.
     }
