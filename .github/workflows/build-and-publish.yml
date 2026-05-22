@@ -69,7 +69,7 @@ jobs:
       - name: Generate BPF Go bindings
         working-directory: tracker
         run: |
-          go install github.com/cilium/ebpf/cmd/bpf2go@v0.17.0
+          go install github.com/cilium/ebpf/cmd/bpf2go@v0.21.0
           go generate ./cmd/...
 
       # -----------------------------------------------------------------------
@@ -130,7 +130,7 @@ jobs:
         run: npm run build
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: dist/
