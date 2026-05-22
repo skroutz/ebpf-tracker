@@ -7,12 +7,12 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
+	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -21,9 +21,24 @@ import (
 	"github.com/skroutz/ebpf-tracker/internal/events"
 )
 
-const outputFile = "/tmp/ebpf-network-events.json"
+const defaultOutputFile = "/tmp/ebpf-network-events.json"
 
 func main() {
+	outputFile := flag.String("output", defaultOutputFile, "path to JSONL output file, or '-' for stdout")
+	flag.Parse()
+
+	runID := os.Getenv("GITHUB_RUN_ID")
+	if runID == "" {
+		runID = "local"
+	}
+	repository := os.Getenv("GITHUB_REPOSITORY")
+	workflowName := os.Getenv("GITHUB_WORKFLOW")
+
+	bootTime, err := events.BootTime()
+	if err != nil {
+		log.Fatalf("read boot time: %v", err)
+	}
+
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatalf("remove memlock: %v", err)
 	}
@@ -35,14 +50,6 @@ func main() {
 	defer objs.Close()
 
 	var klinks []link.Link
-
-	mustKprobe := func(sym string, prog interface{ FD() int }) {
-		// prog is one of the typed *ebpf.Program fields from the generated objs.
-		// We call link.Kprobe via the concrete types below.
-		_ = sym
-		_ = prog
-	}
-	_ = mustKprobe
 
 	kp1, err := link.Kprobe("tcp_v4_connect", objs.TraceTcpV4Connect, nil)
 	if err != nil {
@@ -68,12 +75,19 @@ func main() {
 	}
 	klinks = append(klinks, kp4)
 
-	// udpv6_sendmsg may not exist on all kernels; attach best-effort.
+	// udpv6_sendmsg and udpv6_recvmsg may not exist on all kernels; best-effort.
 	kp5, err := link.Kprobe("udpv6_sendmsg", objs.TraceUdpv6Sendmsg, nil)
 	if err != nil {
 		log.Printf("kprobe udpv6_sendmsg (non-fatal): %v", err)
 	} else {
 		klinks = append(klinks, kp5)
+	}
+
+	kp6, err := link.Kprobe("udpv6_recvmsg", objs.TraceUdpv6Recvmsg, nil)
+	if err != nil {
+		log.Printf("kprobe udpv6_recvmsg (non-fatal): %v", err)
+	} else {
+		klinks = append(klinks, kp6)
 	}
 
 	defer func() {
@@ -82,15 +96,22 @@ func main() {
 		}
 	}()
 
-	f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		log.Fatalf("open output file: %v", err)
+	var w *bufio.Writer
+	if *outputFile == "-" {
+		w = bufio.NewWriterSize(os.Stdout, 64*1024)
+		log.Printf("ebpf-tracker running, writing to stdout")
+		defer w.Flush()
+	} else {
+		f, err := os.OpenFile(*outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			log.Fatalf("open output file: %v", err)
+		}
+		w = bufio.NewWriterSize(f, 64*1024)
+		defer func() {
+			w.Flush()
+			f.Close()
+		}()
 	}
-	w := bufio.NewWriterSize(f, 64*1024)
-	defer func() {
-		w.Flush()
-		f.Close()
-	}()
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
@@ -98,19 +119,19 @@ func main() {
 	}
 	defer rd.Close()
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	log.Printf("ebpf-tracker running, writing to %s", outputFile)
+	if *outputFile != "-" {
+		log.Printf("ebpf-tracker running, writing to %s", *outputFile)
+	}
 
+	// Close the reader when the signal fires so rd.Read() unblocks.
 	go func() {
-		<-sig
+		<-ctx.Done()
 		log.Println("shutting down...")
 		rd.Close()
 	}()
-
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
 
 	for {
 		record, err := rd.Read()
@@ -128,12 +149,15 @@ func main() {
 			continue
 		}
 
-		je := events.Format(e, time.Now())
-		if err := enc.Encode(je); err != nil {
-			log.Printf("encode json: %v", err)
+		je := events.Format(e, bootTime, runID, repository, workflowName)
+		line, err := events.Marshal(je)
+		if err != nil {
+			log.Printf("marshal event: %v", err)
+			continue
 		}
+		w.Write(line)
+		w.WriteByte('\n')
 	}
 
-	w.Flush()
 	log.Println("ebpf-tracker stopped")
 }

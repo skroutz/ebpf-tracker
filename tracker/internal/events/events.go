@@ -4,12 +4,17 @@
 package events
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -18,9 +23,11 @@ const (
 	AFINET   uint8 = 2
 	AFINET6  uint8 = 10
 
-	// RawEventSize is the byte size of struct net_event as laid out by the
-	// C compiler (with natural alignment on amd64).
-	RawEventSize = 78
+	// RawPayloadSize is the number of meaningful bytes read from a ring buffer
+	// record. The C struct net_event has 2 bytes of tail padding on amd64
+	// (sizeof == 80), but those bytes carry no data and are intentionally
+	// ignored during parsing.
+	RawPayloadSize = 78
 )
 
 // RawEvent mirrors the C struct net_event from network_tracker.h.
@@ -41,22 +48,25 @@ type RawEvent struct {
 
 // JSONEvent is the canonical JSONL record written to the output file.
 type JSONEvent struct {
-	Timestamp   string `json:"timestamp"`
-	Protocol    string `json:"protocol"`
-	SrcIP       string `json:"src_ip"`
-	SrcPort     uint16 `json:"src_port"`
-	DstIP       string `json:"dst_ip"`
-	DstPort     uint16 `json:"dst_port"`
-	Pid         uint32 `json:"pid"`
-	ProcessName string `json:"process_name"`
-	Uid         uint32 `json:"uid"`
+	Timestamp    string `json:"timestamp"`
+	RunID        string `json:"run_id"`
+	Repository   string `json:"repository"`
+	WorkflowName string `json:"workflow_name"`
+	Protocol     string `json:"protocol"`
+	SrcIP        string `json:"src_ip"`
+	SrcPort      uint16 `json:"src_port"`
+	DstIP        string `json:"dst_ip"`
+	DstPort      uint16 `json:"dst_port"`
+	Pid          uint32 `json:"pid"`
+	ProcessName  string `json:"process_name"`
+	Uid          uint32 `json:"uid"`
 }
 
 // Parse decodes a raw ring buffer byte slice into a RawEvent.
 // The slice must be at least RawEventSize bytes long.
 func Parse(b []byte) (RawEvent, error) {
-	if len(b) < RawEventSize {
-		return RawEvent{}, fmt.Errorf("record too short: got %d bytes, need %d", len(b), RawEventSize)
+	if len(b) < RawPayloadSize {
+		return RawEvent{}, fmt.Errorf("record too short: got %d bytes, need %d", len(b), RawPayloadSize)
 	}
 
 	var e RawEvent
@@ -76,10 +86,12 @@ func Parse(b []byte) (RawEvent, error) {
 }
 
 // Format converts a RawEvent to its JSONEvent representation.
-// wallNow is the current wall-clock time, used to anchor the kernel boot
-// timestamp to a real UTC time.
-func Format(e RawEvent, wallNow time.Time) JSONEvent {
-	ts := wallNow.Add(-time.Duration(wallNow.UnixNano()) + time.Duration(e.TimestampNs)).UTC()
+// bootTime is the wall-clock time at which the system last booted; the kernel
+// timestamp (bpf_ktime_get_boot_ns, nanoseconds since boot) is added to it to
+// produce a real UTC time. runID, repository, and workflowName are stamped on
+// every event for correlation with the exact workflow run.
+func Format(e RawEvent, bootTime time.Time, runID, repository, workflowName string) JSONEvent {
+	ts := bootTime.Add(time.Duration(e.TimestampNs)).UTC()
 
 	var srcIP, dstIP string
 	if e.Af == AFINET {
@@ -91,8 +103,11 @@ func Format(e RawEvent, wallNow time.Time) JSONEvent {
 	}
 
 	return JSONEvent{
-		Timestamp:   ts.Format(time.RFC3339),
-		Protocol:    protoName(e.Proto),
+		Timestamp:    ts.Format(time.RFC3339),
+		RunID:        runID,
+		Repository:   repository,
+		WorkflowName: workflowName,
+		Protocol:     protoName(e.Proto),
 		SrcIP:       srcIP,
 		SrcPort:     e.SrcPort,
 		DstIP:       dstIP,
@@ -117,13 +132,46 @@ func Marshal(j JSONEvent) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
+// BootTime reads the system boot time from /proc/stat (Linux only).
+// It returns the UTC wall-clock time at which the kernel last booted.
+// This is used to convert bpf_ktime_get_boot_ns values to real timestamps.
+func BootTime() (time.Time, error) {
+	f, err := os.Open("/proc/stat")
+	if err != nil {
+		return time.Time{}, fmt.Errorf("open /proc/stat: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "btime ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			break
+		}
+		sec, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("parse btime: %w", err)
+		}
+		return time.Unix(sec, 0).UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("btime not found in /proc/stat")
+}
+
 // --- helpers ----------------------------------------------------------------
 
 func protoName(p uint8) string {
-	if p == ProtoTCP {
+	switch p {
+	case ProtoTCP:
 		return "TCP"
+	case ProtoUDP:
+		return "UDP"
+	default:
+		return fmt.Sprintf("unknown(%d)", p)
 	}
-	return "UDP"
 }
 
 func commStr(b [16]byte) string {
@@ -131,7 +179,11 @@ func commStr(b [16]byte) string {
 	for n < len(b) && b[n] != 0 {
 		n++
 	}
-	return string(b[:n])
+	s := string(b[:n])
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, string(utf8.RuneError))
+	}
+	return s
 }
 
 func ip4str(raw uint32) string {

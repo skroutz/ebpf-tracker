@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/skroutz/ebpf-tracker/internal/events"
 )
@@ -20,7 +21,7 @@ func buildRaw(
 	proto, af uint8,
 	comm string,
 ) []byte {
-	b := make([]byte, events.RawEventSize)
+	b := make([]byte, events.RawPayloadSize)
 	binary.LittleEndian.PutUint64(b[0:8], tsNs)
 	binary.LittleEndian.PutUint32(b[8:12], srcIP4)
 	binary.LittleEndian.PutUint32(b[12:16], dstIP4)
@@ -41,9 +42,16 @@ func ip4le(a, b2, c, d byte) uint32 {
 	return uint32(a) | uint32(b2)<<8 | uint32(c)<<16 | uint32(d)<<24
 }
 
-// fixedNow is a stable wall clock used in all tests so timestamps are
-// deterministic.
-var fixedNow = time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+// fixedBoot is the simulated system boot time used in all Format tests.
+var fixedBoot = time.Date(2026, 5, 22, 11, 0, 0, 0, time.UTC)
+
+// fixedNow is one hour after boot. Tests that want the formatted timestamp to
+// equal fixedNow must pass uint64(time.Hour) as TimestampNs.
+var fixedNow = fixedBoot.Add(time.Hour)
+
+// oneHourNs is the TimestampNs value (nanoseconds since boot) that corresponds
+// to fixedNow given fixedBoot.
+const oneHourNs = uint64(time.Hour)
 
 // -----------------------------------------------------------------------
 // Parse tests
@@ -143,7 +151,7 @@ func TestParse_IPv6(t *testing.T) {
 }
 
 func TestParse_TooShort(t *testing.T) {
-	_, err := events.Parse(make([]byte, events.RawEventSize-1))
+	_, err := events.Parse(make([]byte, events.RawPayloadSize-1))
 	if err == nil {
 		t.Fatal("expected error for short record, got nil")
 	}
@@ -159,7 +167,7 @@ func TestParse_ExactSize(t *testing.T) {
 
 func TestParse_LongerThanMinimum(t *testing.T) {
 	// Ring buffer may pad records; Parse must tolerate extra bytes.
-	padded := make([]byte, events.RawEventSize+32)
+	padded := make([]byte, events.RawPayloadSize+32)
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
 	copy(padded, raw)
 	_, err := events.Parse(padded)
@@ -174,7 +182,7 @@ func TestParse_LongerThanMinimum(t *testing.T) {
 
 func TestFormat_Schema_TCP4(t *testing.T) {
 	raw := buildRaw(
-		uint64(fixedNow.UnixNano()), // ts == now → timestamp stays at fixedNow
+		oneHourNs, // 1h since boot → timestamp equals fixedNow (fixedBoot + 1h)
 		ip4le(10, 1, 0, 5), ip4le(93, 184, 216, 34),
 		[16]byte{}, [16]byte{},
 		54321, 443,
@@ -183,7 +191,7 @@ func TestFormat_Schema_TCP4(t *testing.T) {
 		"curl",
 	)
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 
 	if j.Protocol != "TCP" {
 		t.Errorf("protocol: got %q, want \"TCP\"", j.Protocol)
@@ -209,21 +217,112 @@ func TestFormat_Schema_TCP4(t *testing.T) {
 	if j.Uid != 1001 {
 		t.Errorf("uid: got %d, want 1001", j.Uid)
 	}
+	if j.RunID != "test-run-id" {
+		t.Errorf("run_id: got %q, want \"test-run-id\"", j.RunID)
+	}
+	if j.Repository != "skroutz/my-repo" {
+		t.Errorf("repository: got %q, want \"skroutz/my-repo\"", j.Repository)
+	}
+	if j.WorkflowName != "CI" {
+		t.Errorf("workflow_name: got %q, want \"CI\"", j.WorkflowName)
+	}
+}
+
+func TestFormat_RunID_Propagated(t *testing.T) {
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	e, _ := events.Parse(raw)
+
+	for _, id := range []string{"12345678", "local", ""} {
+		j := events.Format(e, fixedBoot,id, "skroutz/my-repo", "CI")
+		if j.RunID != id {
+			t.Errorf("run_id: got %q, want %q", j.RunID, id)
+		}
+	}
+}
+
+func TestFormat_RepositoryAndWorkflow_Propagated(t *testing.T) {
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	e, _ := events.Parse(raw)
+
+	j := events.Format(e, fixedBoot, "42", "skroutz/ebpf-tracker", "Build and Publish")
+	if j.Repository != "skroutz/ebpf-tracker" {
+		t.Errorf("repository: got %q, want \"skroutz/ebpf-tracker\"", j.Repository)
+	}
+	if j.WorkflowName != "Build and Publish" {
+		t.Errorf("workflow_name: got %q, want \"Build and Publish\"", j.WorkflowName)
+	}
 }
 
 func TestFormat_Protocol_UDP(t *testing.T) {
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 53, 1, 0, events.ProtoUDP, events.AFINET, "dig")
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 	if j.Protocol != "UDP" {
 		t.Errorf("protocol: got %q, want \"UDP\"", j.Protocol)
 	}
 }
 
-func TestFormat_Timestamp_RFC3339_UTC(t *testing.T) {
-	raw := buildRaw(uint64(fixedNow.UnixNano()), 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+func TestFormat_Protocol_Unknown(t *testing.T) {
+	// Any protocol value other than TCP(6) or UDP(17) must produce a
+	// descriptive string rather than silently misreporting as "UDP".
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, 132 /* SCTP */, events.AFINET, "")
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "", "", "")
+	if j.Protocol == "UDP" || j.Protocol == "TCP" {
+		t.Errorf("unknown protocol silently mapped to %q, want \"unknown(132)\"", j.Protocol)
+	}
+	if j.Protocol != "unknown(132)" {
+		t.Errorf("protocol: got %q, want \"unknown(132)\"", j.Protocol)
+	}
+}
+
+func TestFormat_CommInvalidUTF8(t *testing.T) {
+	// A process can set its comm to arbitrary bytes via prctl(PR_SET_NAME).
+	// Invalid UTF-8 sequences must be replaced, not passed through raw.
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	// Inject invalid UTF-8 bytes directly into the comm field of the raw record.
+	raw[62] = 0xff
+	raw[63] = 0xfe
+	raw[64] = 0x00 // null terminator
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedBoot, "", "", "")
+
+	if !utf8.ValidString(j.ProcessName) {
+		t.Errorf("process_name %q is not valid UTF-8", j.ProcessName)
+	}
+	// The replacement rune must appear in place of the invalid bytes.
+	if !strings.Contains(j.ProcessName, string(utf8.RuneError)) {
+		t.Errorf("expected replacement rune in process_name, got %q", j.ProcessName)
+	}
+}
+
+func TestFormat_Timestamp_NotEpoch(t *testing.T) {
+	// Regression test for the boot-offset bug. A TimestampNs of 30 minutes
+	// (realistic for an event captured shortly after boot) must not produce a
+	// timestamp near the Unix epoch (1970). With the old formula it would.
+	thirtyMinNs := uint64(30 * time.Minute)
+	raw := buildRaw(thirtyMinNs, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedBoot, "r", "repo", "wf")
+
+	ts, err := time.Parse(time.RFC3339, j.Timestamp)
+	if err != nil {
+		t.Fatalf("not RFC3339: %v", err)
+	}
+	epoch := time.Unix(0, 0).UTC()
+	if ts.Before(epoch.Add(24 * time.Hour)) {
+		t.Errorf("timestamp %q is near the Unix epoch — boot-offset bug regression", j.Timestamp)
+	}
+	want := fixedBoot.Add(30 * time.Minute)
+	if !ts.Equal(want) {
+		t.Errorf("timestamp: got %v, want %v", ts, want)
+	}
+}
+
+func TestFormat_Timestamp_RFC3339_UTC(t *testing.T) {
+	raw := buildRaw(oneHourNs, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 
 	ts, err := time.Parse(time.RFC3339, j.Timestamp)
 	if err != nil {
@@ -242,7 +341,7 @@ func TestFormat_CommNullTerminated(t *testing.T) {
 	// Kernel fills comm with null bytes after the name.
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "python3")
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 	if j.ProcessName != "python3" {
 		t.Errorf("process_name: got %q, want \"python3\"", j.ProcessName)
 	}
@@ -255,7 +354,7 @@ func TestFormat_CommFull16Bytes(t *testing.T) {
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
 	copy(raw[62:78], comm[:])
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 	if j.ProcessName != "systemd-resolved" {
 		t.Errorf("process_name: got %q, want \"systemd-resolved\"", j.ProcessName)
 	}
@@ -269,7 +368,7 @@ func TestFormat_IPv6Addresses(t *testing.T) {
 
 	raw := buildRaw(0, 0, 0, src6, dst6, 0, 443, 0, 0, events.ProtoTCP, events.AFINET6, "curl")
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 
 	if j.SrcIP != "::1" {
 		t.Errorf("src_ip: got %q, want \"::1\"", j.SrcIP)
@@ -285,7 +384,7 @@ func TestFormat_IPv6Addresses(t *testing.T) {
 
 func TestMarshal_IsValidJSON(t *testing.T) {
 	raw := buildRaw(
-		uint64(fixedNow.UnixNano()),
+		oneHourNs,
 		ip4le(10, 0, 0, 1), ip4le(1, 1, 1, 1),
 		[16]byte{}, [16]byte{},
 		55000, 443,
@@ -294,7 +393,7 @@ func TestMarshal_IsValidJSON(t *testing.T) {
 		"node",
 	)
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 	b, err := events.Marshal(j)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -308,13 +407,14 @@ func TestMarshal_IsValidJSON(t *testing.T) {
 
 func TestMarshal_RequiredFieldsPresent(t *testing.T) {
 	required := []string{
-		"timestamp", "protocol", "src_ip", "src_port",
+		"timestamp", "run_id", "repository", "workflow_name",
+		"protocol", "src_ip", "src_port",
 		"dst_ip", "dst_port", "pid", "process_name", "uid",
 	}
 
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 	b, _ := events.Marshal(j)
 
 	var m map[string]any
@@ -332,7 +432,7 @@ func TestMarshal_NoHTMLEscaping(t *testing.T) {
 	// This matters for SIEM ingestion where unicode escapes can break field parsing.
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "a<b>c")
 	e, _ := events.Parse(raw)
-	j := events.Format(e, fixedNow)
+	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 	b, _ := events.Marshal(j)
 	out := string(b)
 	// With HTML escaping ON, Go encodes < > & as < > &.

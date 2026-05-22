@@ -71,17 +71,6 @@ int BPF_KPROBE(trace_tcp_v4_connect, struct sock *sk)
     return 0;
 }
 
-SEC("kretprobe/tcp_v4_connect")
-int BPF_KRETPROBE(trace_tcp_v4_connect_ret, int ret)
-{
-    if (ret != 0)
-        return 0;
-
-    // Re-read sk from the map written by entry probe if needed.
-    // For simplicity, rely on the entry probe for connection intent.
-    return 0;
-}
-
 // ---------------------------------------------------------------------------
 // TCP v6 connect
 // ---------------------------------------------------------------------------
@@ -140,11 +129,30 @@ int BPF_KPROBE(trace_udp_recvmsg, struct sock *sk)
 }
 
 // ---------------------------------------------------------------------------
-// UDPv6 sendmsg
+// UDPv6 sendmsg / recvmsg
 // ---------------------------------------------------------------------------
 
 SEC("kprobe/udpv6_sendmsg")
 int BPF_KPROBE(trace_udpv6_sendmsg, struct sock *sk)
+{
+    struct net_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    fill_common(e);
+    e->proto    = PROTO_UDP;
+    e->af       = AF_INET6;
+    BPF_CORE_READ_INTO(&e->src_ip6, sk, __sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8);
+    BPF_CORE_READ_INTO(&e->dst_ip6, sk, __sk_common.skc_v6_daddr.in6_u.u6_addr8);
+    e->src_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_num));
+    e->dst_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("kprobe/udpv6_recvmsg")
+int BPF_KPROBE(trace_udpv6_recvmsg, struct sock *sk)
 {
     struct net_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)

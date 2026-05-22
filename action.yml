@@ -4,8 +4,16 @@ author: 'skroutz'
 
 inputs:
   s3-bucket:
-    description: 'S3 bucket name where the network event log will be uploaded'
-    required: true
+    description: 'S3 bucket name where the network event log will be uploaded (required when output is s3)'
+    required: false
+    default: ''
+  output:
+    description: 'Log destination: "s3" uploads to S3 at job end, "stdio" prints to the runner log (useful for debugging without S3 access)'
+    required: false
+    default: 's3'
+    options:
+      - s3
+      - stdio
 
 runs:
   using: 'node24'

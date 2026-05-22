@@ -14,12 +14,13 @@ A GitHub Action that uses eBPF to track all TCP and UDP network connections made
 │                                                      │
 │  ebpf-tracker (Go binary)                            │
 │  ├── loads BPF program into the kernel               │
-│  ├── hooks: tcp_v4/v6_connect, udp_sendmsg/recvmsg   │
+│  ├── hooks: tcp_v4/v6_connect, udp_send/recvmsg,      │
+  │          udpv6_send/recvmsg (best-effort)           │
 │  └── writes JSONL → /tmp/ebpf-network-events.json    │
 │                                                      │
 │  post.js  (runs automatically after the job)         │
 │  ├── sends SIGTERM to the tracker (graceful flush)    │
-│  └── aws s3 cp → s3://<bucket>/<repo>/<run-id>.json  │
+│  └── aws s3 cp → s3://<bucket>/<repo>/<workflow>/<run-id>-network.json │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -30,12 +31,15 @@ The BPF program uses CO-RE (Compile Once, Run Everywhere) so the same binary run
 One JSON object per line (JSONL), SIEM-compatible:
 
 ```json
-{"timestamp":"2026-05-21T21:20:09Z","protocol":"TCP","src_ip":"10.1.0.5","src_port":54321,"dst_ip":"93.184.216.34","dst_port":443,"pid":1234,"process_name":"curl","uid":1001}
+{"timestamp":"2026-05-21T21:20:09Z","run_id":"12345678","repository":"skroutz/my-repo","workflow_name":"CI","protocol":"TCP","src_ip":"10.1.0.5","src_port":54321,"dst_ip":"93.184.216.34","dst_port":443,"pid":1234,"process_name":"curl","uid":1001}
 ```
 
 | Field | Type | Description |
 |---|---|---|
 | `timestamp` | string | RFC3339 UTC |
+| `run_id` | string | `GITHUB_RUN_ID` — correlates the event with an exact workflow run (`"local"` when run outside Actions) |
+| `repository` | string | `GITHUB_REPOSITORY` (e.g. `skroutz/my-repo`) |
+| `workflow_name` | string | `GITHUB_WORKFLOW` (e.g. `CI`) |
 | `protocol` | string | `TCP` or `UDP` |
 | `src_ip` | string | Source IP (v4 or v6) |
 | `src_port` | number | Source port |
@@ -69,17 +73,30 @@ The action starts the tracker before your steps run and stops it automatically v
 
 ### Inputs
 
-| Input | Required | Description |
-|---|---|---|
-| `s3-bucket` | Yes | S3 bucket name where the log file is uploaded |
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `s3-bucket` | When `output` is `s3` | — | S3 bucket name where the log file is uploaded |
+| `output` | No | `s3` | `s3` — upload to S3 at job end; `stdio` — print events to the runner log (no S3 needed, useful for testing) |
 
 ### S3 output path
 
 ```
-s3://<bucket>/<github-repository>/<run-id>-network.json
+s3://<bucket>/<github-repository>/<workflow-name>/<run-id>-network.json
 ```
 
-Example: `s3://my-bucket/skroutz/my-repo/12345678-network.json`
+Example: `s3://my-bucket/skroutz/my-repo/ci/12345678-network.json`
+
+The workflow name is lowercased and non-alphanumeric characters are replaced with `-` to produce a safe path component.
+
+### Stdio mode (for testing/debugging)
+
+```yaml
+- uses: skroutz/ebpf-tracker@main
+  with:
+    output: stdio
+```
+
+Events are printed directly to the Actions run log. No S3 credentials required.
 
 ### AWS credentials
 
@@ -122,9 +139,11 @@ permissions:
 ### Prerequisites (Linux only)
 
 ```bash
-sudo apt-get install clang llvm libelf-dev libbpf-dev \
-  linux-headers-$(uname -r) linux-tools-$(uname -r) linux-tools-generic
-go install github.com/cilium/ebpf/cmd/bpf2go@latest
+sudo apt-get install clang llvm libelf-dev libbpf-dev linux-headers-$(uname -r)
+# bpftool: package name depends on kernel flavour (generic, azure, aws, …)
+sudo apt-get install "linux-tools-$(uname -r)" || \
+  sudo apt-get install "linux-tools-$(uname -r | sed 's/.*-//')"
+go install github.com/cilium/ebpf/cmd/bpf2go@v0.17.0
 ```
 
 ### Build the tracker binary
@@ -151,13 +170,20 @@ npm run build
 
 ## CI/CD
 
-Pushing to `main` triggers `.github/workflows/build-and-publish.yml`, which:
+Pushing to `main` triggers `.github/workflows/build-and-publish.yml`, which runs two isolated jobs:
 
+**`build`** (`permissions: contents: read, packages: write`):
 1. Generates `vmlinux.h` from the runner kernel's BTF
 2. Compiles the C eBPF program and generates the Go skeleton via `bpf2go`
-3. Builds a fully static Go binary (`CGO_ENABLED=0`)
-4. Pushes the binary to `ghcr.io/skroutz/ebpf-tracker:latest` as an OCI artifact via [ORAS](https://oras.land)
-5. Builds the Node.js action dist and commits it back to `main`
+3. Runs unit tests (`go test ./internal/...`)
+4. Builds a fully static Go binary (`CGO_ENABLED=0`)
+5. Pushes the binary to `ghcr.io/skroutz/ebpf-tracker:latest` as an OCI artifact via [ORAS](https://oras.land)
+6. Builds the Node.js action dist and uploads it as a workflow artifact
+
+**`publish-dist`** (`permissions: contents: write`):
+7. Downloads the dist artifact and commits it back to `main`
+
+The jobs are intentionally split so the build environment (which runs external tools) cannot push to the repository.
 
 ## Requirements
 

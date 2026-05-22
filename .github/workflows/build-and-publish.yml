@@ -5,13 +5,17 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
-
 jobs:
-  build-and-publish:
+  # ---------------------------------------------------------------------------
+  # Job 1: compile the Go binary, run tests, push OCI artifact to ghcr.io,
+  #         and build the Node.js dist. Needs packages:write but NOT
+  #         contents:write — this job never touches the git tree.
+  # ---------------------------------------------------------------------------
+  build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
@@ -25,14 +29,24 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             clang llvm libelf-dev libbpf-dev \
-            "linux-headers-$(uname -r)" \
-            "linux-tools-$(uname -r)" \
-            linux-tools-generic
+            "linux-headers-$(uname -r)"
+          # Install kernel-flavour-aware tools package (provides bpftool).
+          # uname -r on Azure runners yields e.g. 6.17.0-1013-azure; the
+          # tools package is named linux-tools-<version>-<flavour>.
+          KERNEL_TOOLS="linux-tools-$(uname -r)"
+          if sudo apt-get install -y --no-install-recommends "$KERNEL_TOOLS" 2>/dev/null; then
+            echo "Installed $KERNEL_TOOLS"
+          else
+            # Flavour-specific package not in standard repos; fall back to the
+            # flavour metapackage (e.g. linux-tools-azure).
+            FLAVOUR=$(uname -r | sed 's/.*-//')
+            sudo apt-get install -y --no-install-recommends "linux-tools-${FLAVOUR}"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
           cache-dependency-path: tracker/go.sum
 
       # -----------------------------------------------------------------------
@@ -48,8 +62,15 @@ jobs:
       - name: Generate BPF Go bindings
         working-directory: tracker
         run: |
-          go install github.com/cilium/ebpf/cmd/bpf2go@latest
+          go install github.com/cilium/ebpf/cmd/bpf2go@v0.17.0
           go generate ./cmd/...
+
+      # -----------------------------------------------------------------------
+      # Run unit tests (platform-agnostic; no Linux/BPF dependency)
+      # -----------------------------------------------------------------------
+      - name: Run unit tests
+        working-directory: tracker
+        run: go test ./internal/...
 
       # -----------------------------------------------------------------------
       # Build fully static Go binary (CGO_ENABLED=0)
@@ -67,10 +88,7 @@ jobs:
       # Install ORAS CLI
       # -----------------------------------------------------------------------
       - name: Install ORAS
-        run: |
-          ORAS_VERSION=1.2.0
-          curl -sSfL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
-            | tar -xz -C /usr/local/bin oras
+        uses: oras-project/setup-oras@f0d18da5c37edac93d2353d47004a527b9d153a2 # v2
 
       # -----------------------------------------------------------------------
       # Log in to ghcr.io and push the binary as an OCI artifact
@@ -90,10 +108,10 @@ jobs:
             --annotation "org.opencontainers.image.revision=${{ github.sha }}"
 
       # -----------------------------------------------------------------------
-      # Build Node.js action dist files
+      # Build Node.js action dist and upload as artifact for the publish job
       # -----------------------------------------------------------------------
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@670825a89dc0abd596e7a3abd0f5e3f6e5faf37c # v6.4
         with:
           node-version: '24'
           cache: 'npm'
@@ -104,9 +122,35 @@ jobs:
       - name: Build action dist
         run: npm run build
 
-      # -----------------------------------------------------------------------
-      # Commit dist/ back to the repo so the action is usable directly
-      # -----------------------------------------------------------------------
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Job 2: commit the compiled dist/ back to main.
+  # Runs only when the build job succeeds and only needs contents:write.
+  # Isolated from the build environment so a compromised build step cannot
+  # push arbitrary code to the repo.
+  # ---------------------------------------------------------------------------
+  publish-dist:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
       - name: Commit dist
         run: |
           git config user.name  "github-actions[bot]"
