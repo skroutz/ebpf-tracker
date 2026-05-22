@@ -1,0 +1,347 @@
+package events_test
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/skroutz/ebpf-tracker/internal/events"
+)
+
+// buildRaw constructs a raw byte slice matching the struct net_event layout.
+func buildRaw(
+	tsNs uint64,
+	srcIP4, dstIP4 uint32,
+	srcIP6, dstIP6 [16]byte,
+	srcPort, dstPort uint16,
+	pid, uid uint32,
+	proto, af uint8,
+	comm string,
+) []byte {
+	b := make([]byte, events.RawEventSize)
+	binary.LittleEndian.PutUint64(b[0:8], tsNs)
+	binary.LittleEndian.PutUint32(b[8:12], srcIP4)
+	binary.LittleEndian.PutUint32(b[12:16], dstIP4)
+	copy(b[16:32], srcIP6[:])
+	copy(b[32:48], dstIP6[:])
+	binary.LittleEndian.PutUint16(b[48:50], srcPort)
+	binary.LittleEndian.PutUint16(b[50:52], dstPort)
+	binary.LittleEndian.PutUint32(b[52:56], pid)
+	binary.LittleEndian.PutUint32(b[56:60], uid)
+	b[60] = proto
+	b[61] = af
+	copy(b[62:78], []byte(comm))
+	return b
+}
+
+// ip4le encodes a dotted-quad string as little-endian uint32 (kernel layout).
+func ip4le(a, b2, c, d byte) uint32 {
+	return uint32(a) | uint32(b2)<<8 | uint32(c)<<16 | uint32(d)<<24
+}
+
+// fixedNow is a stable wall clock used in all tests so timestamps are
+// deterministic.
+var fixedNow = time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+
+// -----------------------------------------------------------------------
+// Parse tests
+// -----------------------------------------------------------------------
+
+func TestParse_TCP4(t *testing.T) {
+	raw := buildRaw(
+		1_000_000_000, // 1 s since boot
+		ip4le(10, 1, 0, 5), ip4le(93, 184, 216, 34),
+		[16]byte{}, [16]byte{},
+		54321, 443,
+		1234, 1001,
+		events.ProtoTCP, events.AFINET,
+		"curl",
+	)
+
+	e, err := events.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if e.Pid != 1234 {
+		t.Errorf("pid: got %d, want 1234", e.Pid)
+	}
+	if e.Uid != 1001 {
+		t.Errorf("uid: got %d, want 1001", e.Uid)
+	}
+	if e.SrcPort != 54321 {
+		t.Errorf("src_port: got %d, want 54321", e.SrcPort)
+	}
+	if e.DstPort != 443 {
+		t.Errorf("dst_port: got %d, want 443", e.DstPort)
+	}
+	if e.Proto != events.ProtoTCP {
+		t.Errorf("proto: got %d, want %d", e.Proto, events.ProtoTCP)
+	}
+	if e.Af != events.AFINET {
+		t.Errorf("af: got %d, want %d", e.Af, events.AFINET)
+	}
+}
+
+func TestParse_UDP4(t *testing.T) {
+	raw := buildRaw(
+		500_000_000,
+		ip4le(192, 168, 1, 10), ip4le(8, 8, 8, 8),
+		[16]byte{}, [16]byte{},
+		12345, 53,
+		999, 0,
+		events.ProtoUDP, events.AFINET,
+		"systemd-resolve",
+	)
+
+	e, err := events.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if e.Proto != events.ProtoUDP {
+		t.Errorf("proto: got %d, want UDP", e.Proto)
+	}
+	if e.DstPort != 53 {
+		t.Errorf("dst_port: got %d, want 53", e.DstPort)
+	}
+}
+
+func TestParse_IPv6(t *testing.T) {
+	var src6, dst6 [16]byte
+	// ::1
+	src6[15] = 1
+	// 2606:4700:4700::1111
+	dst6[0] = 0x26
+	dst6[1] = 0x06
+	dst6[6] = 0x47
+	dst6[7] = 0x00
+	dst6[14] = 0x11
+	dst6[15] = 0x11
+
+	raw := buildRaw(
+		200_000_000,
+		0, 0,
+		src6, dst6,
+		33333, 443,
+		555, 100,
+		events.ProtoTCP, events.AFINET6,
+		"wget",
+	)
+
+	e, err := events.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if e.Af != events.AFINET6 {
+		t.Errorf("af: got %d, want AF_INET6", e.Af)
+	}
+	if e.SrcIP6 != src6 {
+		t.Errorf("src_ip6 mismatch")
+	}
+}
+
+func TestParse_TooShort(t *testing.T) {
+	_, err := events.Parse(make([]byte, events.RawEventSize-1))
+	if err == nil {
+		t.Fatal("expected error for short record, got nil")
+	}
+}
+
+func TestParse_ExactSize(t *testing.T) {
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	_, err := events.Parse(raw)
+	if err != nil {
+		t.Fatalf("unexpected error for exact-size record: %v", err)
+	}
+}
+
+func TestParse_LongerThanMinimum(t *testing.T) {
+	// Ring buffer may pad records; Parse must tolerate extra bytes.
+	padded := make([]byte, events.RawEventSize+32)
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	copy(padded, raw)
+	_, err := events.Parse(padded)
+	if err != nil {
+		t.Fatalf("unexpected error for padded record: %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Format / JSON schema tests
+// -----------------------------------------------------------------------
+
+func TestFormat_Schema_TCP4(t *testing.T) {
+	raw := buildRaw(
+		uint64(fixedNow.UnixNano()), // ts == now → timestamp stays at fixedNow
+		ip4le(10, 1, 0, 5), ip4le(93, 184, 216, 34),
+		[16]byte{}, [16]byte{},
+		54321, 443,
+		1234, 1001,
+		events.ProtoTCP, events.AFINET,
+		"curl",
+	)
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+
+	if j.Protocol != "TCP" {
+		t.Errorf("protocol: got %q, want \"TCP\"", j.Protocol)
+	}
+	if j.SrcIP != "10.1.0.5" {
+		t.Errorf("src_ip: got %q, want \"10.1.0.5\"", j.SrcIP)
+	}
+	if j.DstIP != "93.184.216.34" {
+		t.Errorf("dst_ip: got %q, want \"93.184.216.34\"", j.DstIP)
+	}
+	if j.SrcPort != 54321 {
+		t.Errorf("src_port: got %d, want 54321", j.SrcPort)
+	}
+	if j.DstPort != 443 {
+		t.Errorf("dst_port: got %d, want 443", j.DstPort)
+	}
+	if j.Pid != 1234 {
+		t.Errorf("pid: got %d, want 1234", j.Pid)
+	}
+	if j.ProcessName != "curl" {
+		t.Errorf("process_name: got %q, want \"curl\"", j.ProcessName)
+	}
+	if j.Uid != 1001 {
+		t.Errorf("uid: got %d, want 1001", j.Uid)
+	}
+}
+
+func TestFormat_Protocol_UDP(t *testing.T) {
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 53, 1, 0, events.ProtoUDP, events.AFINET, "dig")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+	if j.Protocol != "UDP" {
+		t.Errorf("protocol: got %q, want \"UDP\"", j.Protocol)
+	}
+}
+
+func TestFormat_Timestamp_RFC3339_UTC(t *testing.T) {
+	raw := buildRaw(uint64(fixedNow.UnixNano()), 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+
+	ts, err := time.Parse(time.RFC3339, j.Timestamp)
+	if err != nil {
+		t.Fatalf("timestamp %q is not RFC3339: %v", j.Timestamp, err)
+	}
+	if ts.Location() != time.UTC {
+		t.Errorf("timestamp not in UTC: %v", ts.Location())
+	}
+	// Must end with Z, not +00:00, for strict SIEM parsers.
+	if !strings.HasSuffix(j.Timestamp, "Z") {
+		t.Errorf("timestamp %q does not end with Z", j.Timestamp)
+	}
+}
+
+func TestFormat_CommNullTerminated(t *testing.T) {
+	// Kernel fills comm with null bytes after the name.
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "python3")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+	if j.ProcessName != "python3" {
+		t.Errorf("process_name: got %q, want \"python3\"", j.ProcessName)
+	}
+}
+
+func TestFormat_CommFull16Bytes(t *testing.T) {
+	// A 15-char name with no null terminator within the 16-byte field.
+	var comm [16]byte
+	copy(comm[:], "systemd-resolved") // exactly 16 bytes
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	copy(raw[62:78], comm[:])
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+	if j.ProcessName != "systemd-resolved" {
+		t.Errorf("process_name: got %q, want \"systemd-resolved\"", j.ProcessName)
+	}
+}
+
+func TestFormat_IPv6Addresses(t *testing.T) {
+	var src6 [16]byte
+	src6[15] = 1 // ::1
+	var dst6 [16]byte
+	copy(dst6[:], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}) // 2001:db8::1
+
+	raw := buildRaw(0, 0, 0, src6, dst6, 0, 443, 0, 0, events.ProtoTCP, events.AFINET6, "curl")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+
+	if j.SrcIP != "::1" {
+		t.Errorf("src_ip: got %q, want \"::1\"", j.SrcIP)
+	}
+	if j.DstIP != "2001:db8::1" {
+		t.Errorf("dst_ip: got %q, want \"2001:db8::1\"", j.DstIP)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Marshal / JSONL shape tests
+// -----------------------------------------------------------------------
+
+func TestMarshal_IsValidJSON(t *testing.T) {
+	raw := buildRaw(
+		uint64(fixedNow.UnixNano()),
+		ip4le(10, 0, 0, 1), ip4le(1, 1, 1, 1),
+		[16]byte{}, [16]byte{},
+		55000, 443,
+		42, 0,
+		events.ProtoTCP, events.AFINET,
+		"node",
+	)
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+	b, err := events.Marshal(j)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nraw: %s", err, b)
+	}
+}
+
+func TestMarshal_RequiredFieldsPresent(t *testing.T) {
+	required := []string{
+		"timestamp", "protocol", "src_ip", "src_port",
+		"dst_ip", "dst_port", "pid", "process_name", "uid",
+	}
+
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+	b, _ := events.Marshal(j)
+
+	var m map[string]any
+	json.Unmarshal(b, &m)
+
+	for _, field := range required {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing required field %q in JSON output", field)
+		}
+	}
+}
+
+func TestMarshal_NoHTMLEscaping(t *testing.T) {
+	// Characters like < > & must appear literally, not as < / > / &.
+	// This matters for SIEM ingestion where unicode escapes can break field parsing.
+	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "a<b>c")
+	e, _ := events.Parse(raw)
+	j := events.Format(e, fixedNow)
+	b, _ := events.Marshal(j)
+	out := string(b)
+	// With HTML escaping ON, Go encodes < > & as < > &.
+	// Confirm those escaped sequences are absent (i.e. escaping is disabled).
+	if strings.Contains(out, "\\u003c") || strings.Contains(out, "\\u003e") || strings.Contains(out, "\\u0026") {
+		t.Errorf("output contains HTML unicode escapes: %s", out)
+	}
+	// And confirm the characters are present literally.
+	if !strings.Contains(out, "a<b>c") {
+		t.Errorf("expected literal a<b>c in output, got: %s", out)
+	}
+}

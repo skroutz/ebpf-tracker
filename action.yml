@@ -1,0 +1,13 @@
+name: 'eBPF Network Tracker'
+description: 'Tracks all TCP/UDP connections on the GitHub Runner via eBPF and uploads logs to S3'
+author: 'skroutz'
+
+inputs:
+  s3-bucket:
+    description: 'S3 bucket name where the network event log will be uploaded'
+    required: true
+
+runs:
+  using: 'node24'
+  main: 'dist/main.js'
+  post: 'dist/post.js'

@@ -1,0 +1,119 @@
+name: Build and Publish eBPF Tracker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # System dependencies
+      # -----------------------------------------------------------------------
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libelf-dev libbpf-dev \
+            "linux-headers-$(uname -r)" \
+            bpftool
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: tracker/go.sum
+
+      # -----------------------------------------------------------------------
+      # Generate vmlinux.h from the running kernel's BTF
+      # -----------------------------------------------------------------------
+      - name: Generate vmlinux.h
+        run: |
+          bpftool btf dump file /sys/kernel/btf/vmlinux format c > tracker/bpf/vmlinux.h
+
+      # -----------------------------------------------------------------------
+      # Compile C → BPF object, then bpf2go → Go skeleton
+      # -----------------------------------------------------------------------
+      - name: Generate BPF Go bindings
+        working-directory: tracker
+        run: |
+          go install github.com/cilium/ebpf/cmd/bpf2go@latest
+          go generate ./cmd/...
+
+      # -----------------------------------------------------------------------
+      # Build fully static Go binary (CGO_ENABLED=0)
+      # -----------------------------------------------------------------------
+      - name: Build static Go binary
+        working-directory: tracker
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -ldflags="-s -w" -o ebpf-tracker ./cmd/
+
+      # -----------------------------------------------------------------------
+      # Install ORAS CLI
+      # -----------------------------------------------------------------------
+      - name: Install ORAS
+        run: |
+          ORAS_VERSION=1.2.0
+          curl -sSfL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin oras
+
+      # -----------------------------------------------------------------------
+      # Log in to ghcr.io and push the binary as an OCI artifact
+      # -----------------------------------------------------------------------
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Push binary to ghcr.io
+        working-directory: tracker
+        run: |
+          oras push \
+            ghcr.io/skroutz/ebpf-tracker:latest \
+            ebpf-tracker:application/octet-stream \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.revision=${{ github.sha }}"
+
+      # -----------------------------------------------------------------------
+      # Build Node.js action dist files
+      # -----------------------------------------------------------------------
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Build action dist
+        run: npm run build
+
+      # -----------------------------------------------------------------------
+      # Commit dist/ back to the repo so the action is usable directly
+      # -----------------------------------------------------------------------
+      - name: Commit dist
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist/
+          if git diff --cached --quiet; then
+            echo "No dist changes"
+          else
+            git commit -m "chore: rebuild dist [skip ci]"
+          fi
+          git push

@@ -1,0 +1,5 @@
+node_modules/
+tracker/bpf/vmlinux.h
+tracker/cmd/networktracker_bpf*.go
+tracker/cmd/networktracker_bpf*.o
+tracker/ebpf-tracker
