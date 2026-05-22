@@ -30,20 +30,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm libelf-dev libbpf-dev \
             "linux-headers-$(uname -r)"
-          # GitHub-hosted Azure runners pre-install linux-tools-<ver>-azure,
-          # so the bpftool binary already exists under /usr/lib/linux-tools/.
-          # However /usr/bin/bpftool is a wrapper that resolves the binary via
-          # `uname -r` literally; on Azure runners uname -r omits the -azure
-          # suffix, so the wrapper always fails. Bypass it by finding the real
-          # binary and symlinking it into /usr/local/bin (higher PATH priority).
+          # /usr/bin/bpftool is a wrapper that resolves the real binary via
+          # `uname -r` literally. On Azure runners uname -r omits the flavour
+          # suffix (e.g. 6.17.0-1013 vs 6.17.0-1013-azure), so the wrapper
+          # always fails. Instead: find the real binary under
+          # /usr/lib/linux-tools, install linux-tools-generic if it's absent,
+          # then symlink into /usr/local/bin to bypass the wrapper.
           BPFTOOL_BIN=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | head -1)
-          if [ -n "$BPFTOOL_BIN" ]; then
-            sudo ln -sf "$BPFTOOL_BIN" /usr/local/bin/bpftool
-            echo "bpftool → $BPFTOOL_BIN"
-          else
-            echo "bpftool not found under /usr/lib/linux-tools; falling back to apt"
+          if [ -z "$BPFTOOL_BIN" ]; then
             sudo apt-get install -y --no-install-recommends linux-tools-generic
+            BPFTOOL_BIN=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | head -1)
           fi
+          if [ -z "$BPFTOOL_BIN" ]; then
+            echo "ERROR: bpftool binary not found" >&2; exit 1
+          fi
+          sudo ln -sf "$BPFTOOL_BIN" /usr/local/bin/bpftool
+          echo "bpftool → $BPFTOOL_BIN"
           bpftool version
 
       - name: Set up Go
