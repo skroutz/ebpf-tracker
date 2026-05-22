@@ -126,8 +126,18 @@ int BPF_PROG(trace_tcp_v6_connect,
 // UDP v4 sendmsg — fentry with per-flow deduplication
 //
 // Connected sockets: destination in sk->skc_daddr / skc_dport.
-// Unconnected sockets (e.g. DNS queries via sendto): destination read from
-// msg->msg_name, which is a kernel-stack copy at this call depth.
+// Unconnected sockets (e.g. DNS queries): destination in msg->msg_name.
+//
+// Pointer type of msg_name depends on the syscall path:
+//   sendto()  → __sys_sendto calls move_addr_to_kernel() first, so msg_name
+//               is a kernel stack pointer by the time udp_sendmsg is called.
+//   sendmsg() → copy_msghdr_from_user() leaves msg_name as the original
+//               userspace pointer (move_addr_to_kernel is NOT called first).
+//
+// We try bpf_probe_read_kernel first; if it fails or produces a non-AF_INET
+// family, we retry with bpf_probe_read_user. sin_family == AF_INET acts as a
+// sanity check to distinguish a successful read from a failed one that
+// returned a zeroed buffer.
 // ---------------------------------------------------------------------------
 
 SEC("fentry/udp_sendmsg")
@@ -144,7 +154,14 @@ int BPF_PROG(trace_udp_sendmsg,
         if (msg_name) {
             struct sockaddr_in sa4;
             __builtin_memset(&sa4, 0, sizeof(sa4));
-            if (bpf_probe_read_kernel(&sa4, sizeof(sa4), msg_name) == 0) {
+            // sendto() path: msg_name is a kernel pointer.
+            if (bpf_probe_read_kernel(&sa4, sizeof(sa4), msg_name) != 0 ||
+                sa4.sin_family != AF_INET) {
+                // sendmsg() path: msg_name is still a userspace pointer.
+                __builtin_memset(&sa4, 0, sizeof(sa4));
+                bpf_probe_read_user(&sa4, sizeof(sa4), msg_name);
+            }
+            if (sa4.sin_family == AF_INET) {
                 dst_ip4  = sa4.sin_addr.s_addr;
                 dst_port = bpf_ntohs(sa4.sin_port);
             }
