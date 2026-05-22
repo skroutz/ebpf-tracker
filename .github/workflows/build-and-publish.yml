@@ -3,6 +3,8 @@ name: Build and Publish eBPF Tracker
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/workflows/test-tracker.yml'
   workflow_dispatch:
 
 jobs:
