@@ -34834,7 +34834,25 @@ const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 
 const TRACKER_PATH = '/tmp/ebpf-tracker';
+const PID_FILE = '/tmp/ebpf-tracker.pid';
 const IMAGE = 'ghcr.io/skroutz/ebpf-tracker:latest';
+
+/**
+ * Poll until the tracker has written its PID file, or the timeout expires.
+ * Returns the PID as a number, or null if the file never appeared.
+ */
+async function waitForPidFile(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(PID_FILE)) {
+      const content = fs.readFileSync(PID_FILE, 'utf8').trim();
+      const pid = parseInt(content, 10);
+      if (pid > 1) return pid;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return null;
+}
 
 async function run() {
   try {
@@ -34887,7 +34905,7 @@ async function run() {
     // the tracker's actual PID running as root.
     const sudoersLine =
       'runner ALL=(root) NOPASSWD:NOSETENV: ' + TRACKER_PATH + '\n' +
-      'Defaults!' + TRACKER_PATH + ' !use_pty\n';
+      'Defaults!' + TRACKER_PATH + ' !use_pty, env_keep += "GITHUB_RUN_ID GITHUB_REPOSITORY GITHUB_WORKFLOW"\n';
     await exec.exec('sudo', ['tee', '/etc/sudoers.d/ebpf-tracker'], {
       input: Buffer.from(sudoersLine),
       silent: true,
@@ -34915,10 +34933,19 @@ async function run() {
       return;
     }
 
-    core.saveState('TRACKER_PID', String(pid));
-    core.info(`eBPF tracker started with PID ${pid} (output: ${outputMode})`);
-
     child.unref();
+
+    // The binary writes its own PID (as root) to a file after BPF loading
+    // succeeds. Use that for a reliable SIGTERM target in the post step.
+    const trackerPid = await waitForPidFile(10000);
+    if (trackerPid) {
+      core.saveState('TRACKER_PID', String(trackerPid));
+      core.info(`Tracker confirmed running with PID ${trackerPid} (output: ${outputMode})`);
+    } else {
+      core.warning('Tracker PID file not written within 10 s; falling back to sudo PID');
+      core.saveState('TRACKER_PID', String(pid));
+      core.info(`eBPF tracker started with sudo PID ${pid} (output: ${outputMode})`);
+    }
   } catch (err) {
     core.setFailed(err.message);
   }

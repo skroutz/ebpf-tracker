@@ -8,11 +8,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -49,29 +52,35 @@ func main() {
 	}
 	defer objs.Close()
 
+	// Write PID file so the GHA post step can send an exact SIGTERM.
+	if err := os.WriteFile("/tmp/ebpf-tracker.pid", []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		log.Printf("write pid file: %v", err)
+	}
+	defer os.Remove("/tmp/ebpf-tracker.pid")
+
 	var klinks []link.Link
 
-	kp1, err := link.Kprobe("tcp_v4_connect", objs.TraceTcpV4Connect, nil)
+	kp1, err := link.AttachTracing(link.TracingOptions{Program: objs.TraceTcpV4Connect})
 	if err != nil {
-		log.Fatalf("kprobe tcp_v4_connect: %v", err)
+		log.Fatalf("fexit tcp_v4_connect: %v", err)
 	}
 	klinks = append(klinks, kp1)
 
-	kp2, err := link.Kprobe("tcp_v6_connect", objs.TraceTcpV6Connect, nil)
+	kp2, err := link.AttachTracing(link.TracingOptions{Program: objs.TraceTcpV6Connect})
 	if err != nil {
-		log.Fatalf("kprobe tcp_v6_connect: %v", err)
+		log.Fatalf("fexit tcp_v6_connect: %v", err)
 	}
 	klinks = append(klinks, kp2)
 
-	kp3, err := link.Kprobe("udp_sendmsg", objs.TraceUdpSendmsg, nil)
+	kp3, err := link.AttachTracing(link.TracingOptions{Program: objs.TraceUdpSendmsg})
 	if err != nil {
-		log.Fatalf("kprobe udp_sendmsg: %v", err)
+		log.Fatalf("fentry udp_sendmsg: %v", err)
 	}
 	klinks = append(klinks, kp3)
 
-	kp4, err := link.Kprobe("udp_recvmsg", objs.TraceUdpRecvmsg, nil)
+	kp4, err := link.AttachTracing(link.TracingOptions{Program: objs.TraceUdpRecvmsg})
 	if err != nil {
-		log.Fatalf("kprobe udp_recvmsg: %v", err)
+		log.Fatalf("fentry udp_recvmsg: %v", err)
 	}
 	klinks = append(klinks, kp4)
 
@@ -126,17 +135,19 @@ func main() {
 		log.Printf("ebpf-tracker running, writing to %s", *outputFile)
 	}
 
-	// Close the reader when the signal fires so rd.Read() unblocks.
+	// Set a past deadline on the reader when the signal fires so rd.Read()
+	// unblocks immediately. Using SetDeadline is more reliable than Close()
+	// for interrupting a blocked epoll wait inside cilium/ebpf's ring buffer.
 	go func() {
 		<-ctx.Done()
 		log.Println("shutting down...")
-		rd.Close()
+		rd.SetDeadline(time.Now())
 	}()
 
 	for {
 		record, err := rd.Read()
 		if err != nil {
-			if err == ringbuf.ErrClosed {
+			if err == ringbuf.ErrClosed || errors.Is(err, os.ErrDeadlineExceeded) {
 				break
 			}
 			log.Printf("ringbuf read: %v", err)
@@ -157,6 +168,11 @@ func main() {
 		}
 		w.Write(line)
 		w.WriteByte('\n')
+		// In stdio mode flush immediately so events are visible in the runner
+		// log without waiting for the 64 KiB buffer to fill or a clean exit.
+		if *outputFile == "-" {
+			w.Flush()
+		}
 	}
 
 	log.Println("ebpf-tracker stopped")

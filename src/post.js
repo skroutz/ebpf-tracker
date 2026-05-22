@@ -6,31 +6,23 @@ const EVENTS_FILE = '/tmp/ebpf-network-events.json';
 const SHUTDOWN_TIMEOUT_MS = 15000;
 const POLL_INTERVAL_MS = 100;
 
-function isAlive(pid) {
-  // Check both the saved PID (sudo) and any child named ebpf-tracker.
-  // The tracker has exited only when both are gone.
-  for (const p of [pid, -pid]) {
-    try {
-      process.kill(p, 0);
-      return true;
-    } catch (err) {
-      if (err.code === 'EPERM') return true; // exists but root-owned
-    }
-  }
-  // Also check if the ebpf-tracker child process is still running.
+function isAlive() {
+  // Check by process name: this is the only reliable signal because the saved
+  // PID belongs to the sudo parent (root-owned), so kill(pid, 0) always returns
+  // EPERM while sudo is alive — even after the tracker child has already exited.
   try {
     const { execSync } = require('child_process');
-    const out = execSync(`pgrep -x ebpf-tracker 2>/dev/null || true`).toString().trim();
+    const out = execSync('pgrep -x ebpf-tracker 2>/dev/null || true').toString().trim();
     return out.length > 0;
   } catch {
     return false;
   }
 }
 
-async function waitForExit(pid) {
+async function waitForExit() {
   const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (!isAlive(pid)) return true;
+    if (!isAlive()) return true;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   return false;
@@ -52,17 +44,16 @@ async function run() {
     return;
   }
 
-  // Signal ebpf-tracker directly by name (covers both the case where sudo
-  // exec()d it directly and the case where it remains a child of sudo).
-  core.info(`Sending SIGTERM to ebpf-tracker (sudo PID ${pid})`);
+  // Signal ebpf-tracker by its exact PID written to the PID file.
+  core.info(`Sending SIGTERM to ebpf-tracker (PID ${pid})`);
   try {
-    await exec.exec('sudo', ['pkill', '-TERM', '-x', 'ebpf-tracker']);
+    await exec.exec('sudo', ['kill', '-TERM', String(pid)]);
   } catch (err) {
-    core.warning(`pkill SIGTERM failed: ${err.message}`);
+    core.warning(`kill SIGTERM failed: ${err.message}`);
   }
 
   // Poll for exit; escalate to SIGKILL if the process hasn't stopped in time.
-  const exited = await waitForExit(pid);
+  const exited = await waitForExit();
   if (!exited) {
     core.warning(`Tracker did not exit within ${SHUTDOWN_TIMEOUT_MS}ms; sending SIGKILL`);
     try {

@@ -20,7 +20,19 @@ struct net_event {
     __u16 dst_port;
     __u32 pid;
     __u32 uid;
+    __s32 ret;     // kernel return value (TCP: 0/-EINPROGRESS/error; UDP: always 0)
     __u8  proto;   // PROTO_TCP or PROTO_UDP
     __u8  af;      // AF_INET or AF_INET6
     char  comm[TASK_COMM_LEN];
+};
+
+// Key for per-flow UDP deduplication map. All bytes must be zeroed before use
+// so the map key comparison is deterministic (no padding byte surprises).
+struct udp_dedup_key {
+    __u32 pid;
+    __u32 dst_ip4;   // non-zero for AF_INET; zero for AF_INET6
+    __u8  dst_ip6[16];
+    __u16 dst_port;
+    __u8  af;
+    __u8  _pad;
 };

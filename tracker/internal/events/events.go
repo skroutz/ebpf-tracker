@@ -23,11 +23,11 @@ const (
 	AFINET   uint8 = 2
 	AFINET6  uint8 = 10
 
-	// RawPayloadSize is the number of meaningful bytes read from a ring buffer
-	// record. The C struct net_event has 2 bytes of tail padding on amd64
-	// (sizeof == 80), but those bytes carry no data and are intentionally
-	// ignored during parsing.
-	RawPayloadSize = 78
+	// RawPayloadSize is the number of meaningful bytes in a ring buffer record.
+	// Layout (amd64): timestamp_ns(8) src_ip4(4) dst_ip4(4) src_ip6(16)
+	// dst_ip6(16) src_port(2) dst_port(2) pid(4) uid(4) ret(4) proto(1) af(1)
+	// comm(16) = 82 bytes. sizeof(net_event) == 88 (6 bytes tail padding).
+	RawPayloadSize = 82
 )
 
 // RawEvent mirrors the C struct net_event from network_tracker.h.
@@ -41,6 +41,7 @@ type RawEvent struct {
 	DstPort     uint16
 	Pid         uint32
 	Uid         uint32
+	Ret         int32  // kernel return value; TCP: 0/-EINPROGRESS/error; UDP: 0
 	Proto       uint8
 	Af          uint8
 	Comm        [16]byte
@@ -60,6 +61,7 @@ type JSONEvent struct {
 	Pid          uint32 `json:"pid"`
 	ProcessName  string `json:"process_name"`
 	Uid          uint32 `json:"uid"`
+	Ret          int32  `json:"ret"` // kernel return value (TCP only; always 0 for UDP)
 }
 
 // Parse decodes a raw ring buffer byte slice into a RawEvent.
@@ -79,9 +81,10 @@ func Parse(b []byte) (RawEvent, error) {
 	e.DstPort = binary.LittleEndian.Uint16(b[50:52])
 	e.Pid = binary.LittleEndian.Uint32(b[52:56])
 	e.Uid = binary.LittleEndian.Uint32(b[56:60])
-	e.Proto = b[60]
-	e.Af = b[61]
-	copy(e.Comm[:], b[62:78])
+	e.Ret = int32(binary.LittleEndian.Uint32(b[60:64]))
+	e.Proto = b[64]
+	e.Af = b[65]
+	copy(e.Comm[:], b[66:82])
 	return e, nil
 }
 
@@ -108,13 +111,14 @@ func Format(e RawEvent, bootTime time.Time, runID, repository, workflowName stri
 		Repository:   repository,
 		WorkflowName: workflowName,
 		Protocol:     protoName(e.Proto),
-		SrcIP:       srcIP,
-		SrcPort:     e.SrcPort,
-		DstIP:       dstIP,
-		DstPort:     e.DstPort,
-		Pid:         e.Pid,
-		ProcessName: commStr(e.Comm),
-		Uid:         e.Uid,
+		SrcIP:        srcIP,
+		SrcPort:      e.SrcPort,
+		DstIP:        dstIP,
+		DstPort:      e.DstPort,
+		Pid:          e.Pid,
+		ProcessName:  commStr(e.Comm),
+		Uid:          e.Uid,
+		Ret:          e.Ret,
 	}
 }
 
