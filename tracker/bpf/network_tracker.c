@@ -8,6 +8,14 @@
 #include <bpf/bpf_endian.h>
 #include "network_tracker.h"
 
+// vmlinux.h does not export errno constants; define the ones we need.
+#ifndef EINVAL
+#define EINVAL          22
+#endif
+#ifndef EAFNOSUPPORT
+#define EAFNOSUPPORT    97
+#endif
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 4 * 1024 * 1024); // 4 MiB
