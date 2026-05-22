@@ -122,7 +122,8 @@ permissions:
 ### Prerequisites (Linux only)
 
 ```bash
-sudo apt-get install clang llvm libelf-dev libbpf-dev bpftool linux-headers-$(uname -r)
+sudo apt-get install clang llvm libelf-dev libbpf-dev \
+  linux-headers-$(uname -r) linux-tools-$(uname -r) linux-tools-generic
 go install github.com/cilium/ebpf/cmd/bpf2go@latest
 ```
 
