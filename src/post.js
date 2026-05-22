@@ -10,8 +10,10 @@ function isAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    // EPERM means the process exists but we lack permission (running as root).
+    // ESRCH means the process is gone.
+    return err.code === 'EPERM';
   }
 }
 
@@ -40,9 +42,11 @@ async function run() {
     return;
   }
 
+  // The tracker runs as root (via sudo), so process.kill() from the runner
+  // user will be EPERM. Use `sudo kill` instead.
   core.info(`Sending SIGTERM to tracker PID ${pid}`);
   try {
-    process.kill(pid, 'SIGTERM');
+    await exec.exec('sudo', ['kill', '-TERM', String(pid)], { silent: true });
   } catch (err) {
     core.warning(`Could not signal PID ${pid}: ${err.message}`);
   }
@@ -52,7 +56,7 @@ async function run() {
   if (!exited) {
     core.warning(`Tracker did not exit within ${SHUTDOWN_TIMEOUT_MS}ms; sending SIGKILL`);
     try {
-      process.kill(pid, 'SIGKILL');
+      await exec.exec('sudo', ['kill', '-KILL', String(pid)], { silent: true });
     } catch {
       // Already gone — that is fine.
     }
