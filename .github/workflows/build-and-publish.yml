@@ -12,7 +12,7 @@ jobs:
   #         contents:write — this job never touches the git tree.
   # ---------------------------------------------------------------------------
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -30,18 +30,32 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm libelf-dev libbpf-dev \
             "linux-headers-$(uname -r)"
-          # Install kernel-flavour-aware tools package (provides bpftool).
-          # uname -r on Azure runners yields e.g. 6.17.0-1013-azure; the
-          # tools package is named linux-tools-<version>-<flavour>.
-          KERNEL_TOOLS="linux-tools-$(uname -r)"
-          if sudo apt-get install -y --no-install-recommends "$KERNEL_TOOLS" 2>/dev/null; then
-            echo "Installed $KERNEL_TOOLS"
+          # Install the kernel tools package that provides bpftool.
+          #
+          # On Azure runners uname -r may omit the flavour suffix (e.g.
+          # 6.17.0-1013 instead of 6.17.0-1013-azure), so a direct
+          # linux-tools-$(uname -r) lookup can fail. We use apt-cache search
+          # to find the right versioned package, then fall back to the flavour
+          # metapackage, then to linux-tools-generic.
+          KERNEL=$(uname -r)
+          TOOLS_PKG=$(apt-cache search --names-only "linux-tools-${KERNEL}" 2>/dev/null | awk 'NR==1{print $1}')
+          if [ -n "$TOOLS_PKG" ]; then
+            sudo apt-get install -y --no-install-recommends "$TOOLS_PKG"
+          elif sudo apt-get install -y --no-install-recommends "linux-tools-${KERNEL}" 2>/dev/null; then
+            echo "Installed linux-tools-${KERNEL}"
           else
-            # Flavour-specific package not in standard repos; fall back to the
-            # flavour metapackage (e.g. linux-tools-azure).
-            FLAVOUR=$(uname -r | sed 's/.*-//')
-            sudo apt-get install -y --no-install-recommends "linux-tools-${FLAVOUR}"
+            sudo apt-get install -y --no-install-recommends linux-tools-azure 2>/dev/null || \
+            sudo apt-get install -y --no-install-recommends linux-tools-generic
           fi
+          # The Ubuntu bpftool wrapper (/usr/bin/bpftool) resolves the binary
+          # via uname -r, which may not match the installed package's flavour
+          # suffix. Symlink the actual binary to /usr/local/bin to bypass it.
+          BPFTOOL_BIN=$(find /usr/lib/linux-tools -name bpftool -executable -type f 2>/dev/null | head -1)
+          if [ -n "$BPFTOOL_BIN" ]; then
+            sudo ln -sf "$BPFTOOL_BIN" /usr/local/bin/bpftool
+            echo "bpftool → $BPFTOOL_BIN"
+          fi
+          bpftool version
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -137,7 +151,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-dist:
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
