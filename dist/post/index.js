@@ -31429,12 +31429,13 @@ const SHUTDOWN_TIMEOUT_MS = 5000;
 const POLL_INTERVAL_MS = 100;
 
 function isAlive(pid) {
+  // Check the process group (negative pid) since the tracker is a child of sudo.
   try {
-    process.kill(pid, 0);
+    process.kill(-pid, 0);
     return true;
   } catch (err) {
-    // EPERM means the process exists but we lack permission (running as root).
-    // ESRCH means the process is gone.
+    // EPERM: group exists but we lack permission (root process) → still alive.
+    // ESRCH: group is gone → dead.
     return err.code === 'EPERM';
   }
 }
@@ -31464,13 +31465,15 @@ async function run() {
     return;
   }
 
-  // The tracker runs as root (via sudo), so process.kill() from the runner
-  // user will be EPERM. Use `sudo kill` instead.
-  core.info(`Sending SIGTERM to tracker PID ${pid}`);
+  // The tracker runs as root (via sudo). sudo forks a child to exec the
+  // binary, so the saved PID is sudo's PID, not the binary's. We signal the
+  // entire process group (negative PID) so both sudo and its child receive
+  // the signal. The group was created by spawn's detached:true (setsid).
+  core.info(`Sending SIGTERM to tracker process group ${pid}`);
   try {
-    await exec.exec('sudo', ['kill', '-TERM', String(pid)], { silent: true });
+    await exec.exec('sudo', ['kill', '-TERM', `--`, String(-pid)], { silent: true });
   } catch (err) {
-    core.warning(`Could not signal PID ${pid}: ${err.message}`);
+    core.warning(`Could not signal process group ${pid}: ${err.message}`);
   }
 
   // Poll for exit; escalate to SIGKILL if the process hasn't stopped in time.
@@ -31478,7 +31481,7 @@ async function run() {
   if (!exited) {
     core.warning(`Tracker did not exit within ${SHUTDOWN_TIMEOUT_MS}ms; sending SIGKILL`);
     try {
-      await exec.exec('sudo', ['kill', '-KILL', String(pid)], { silent: true });
+      await exec.exec('sudo', ['kill', '-KILL', `--`, String(-pid)], { silent: true });
     } catch {
       // Already gone — that is fine.
     }
