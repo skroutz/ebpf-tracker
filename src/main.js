@@ -55,7 +55,9 @@ async function run() {
     const isStdio = outputMode === 'stdio';
     const args = isStdio ? ['--output', '-'] : [];
 
-    const child = spawn(TRACKER_PATH, args, {
+    // eBPF requires elevated privileges to load programs and raise the memlock
+    // rlimit. GitHub-hosted runners have passwordless sudo.
+    const child = spawn('sudo', [TRACKER_PATH, ...args], {
       detached: true,
       stdio: isStdio ? ['ignore', 'pipe', 'pipe'] : 'ignore',
     });
