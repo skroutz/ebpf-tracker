@@ -57,19 +57,18 @@ async function run() {
 
     // eBPF requires elevated privileges to load programs and raise the memlock
     // rlimit. GitHub-hosted runners have passwordless sudo.
+    //
+    // In stdio mode use 'inherit' so the tracker writes directly to the
+    // runner's stdout/stderr (Actions captures all fd output). Using 'pipe'
+    // would keep the Node.js event loop alive indefinitely via open pipe refs.
     const child = spawn('sudo', [TRACKER_PATH, ...args], {
       detached: true,
-      stdio: isStdio ? ['ignore', 'pipe', 'pipe'] : 'ignore',
+      stdio: isStdio ? ['ignore', 'inherit', 'inherit'] : 'ignore',
     });
 
     child.on('error', (err) => {
       core.error(`Failed to start tracker: ${err.message}`);
     });
-
-    if (isStdio) {
-      child.stdout.on('data', (data) => core.info(data.toString().trim()));
-      child.stderr.on('data', (data) => core.info(data.toString().trim()));
-    }
 
     const pid = child.pid;
     if (!pid) {
