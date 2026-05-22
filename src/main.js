@@ -1,7 +1,9 @@
 const core = require('@actions/core');
 const exec = require('@actions/exec');
+const tc = require('@actions/tool-cache');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 
 const TRACKER_PATH = '/tmp/ebpf-tracker';
 const IMAGE = 'ghcr.io/skroutz/ebpf-tracker:latest';
@@ -24,6 +26,21 @@ async function run() {
 
     core.saveState('OUTPUT_MODE', outputMode);
     core.saveState('S3_BUCKET', s3Bucket);
+
+    // Install ORAS CLI if not already on PATH.
+    let orasPath = 'oras';
+    try {
+      await exec.exec('oras', ['version'], { silent: true });
+    } catch {
+      core.info('ORAS not found on PATH; downloading...');
+      const ORAS_VERSION = '1.2.3';
+      const url = `https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz`;
+      const tarball = await tc.downloadTool(url);
+      const extractedDir = await tc.extractTar(tarball);
+      orasPath = path.join(extractedDir, 'oras');
+      core.addPath(extractedDir);
+      core.info(`ORAS installed at ${orasPath}`);
+    }
 
     // Pull the binary artifact from ghcr.io using ORAS CLI.
     core.info(`Pulling eBPF tracker binary from ${IMAGE}`);
