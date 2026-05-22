@@ -34,19 +34,6 @@ struct {
 #define UDP_DEDUP_NS 1000000000ULL  // 1 second
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-static __always_inline void fill_common(struct net_event *e)
-{
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    e->pid          = pid_tgid >> 32;
-    e->uid          = bpf_get_current_uid_gid() & 0xffffffff;
-    e->timestamp_ns = bpf_ktime_get_boot_ns();
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
-}
-
-// ---------------------------------------------------------------------------
 // TCP v4 connect — fexit
 //
 // fexit over kprobe gives us two things:
