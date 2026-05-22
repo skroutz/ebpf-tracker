@@ -5,7 +5,7 @@
 #define AF_INET  2
 #define AF_INET6 10
 
-enum proto {
+enum net_proto {
     PROTO_TCP = 6,
     PROTO_UDP = 17,
 };
