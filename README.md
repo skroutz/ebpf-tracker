@@ -49,6 +49,7 @@ One JSON object per line (JSONL), SIEM-compatible:
 | `process_name` | string | Process name (`comm`, max 15 chars) |
 | `uid` | number | User ID |
 
+
 ## Usage
 
 ```yaml
