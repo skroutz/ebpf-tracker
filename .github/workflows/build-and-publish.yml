@@ -30,24 +30,19 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm libelf-dev libbpf-dev \
             "linux-headers-$(uname -r)"
-          # On Ubuntu 24.04 bpftool is a standalone package independent of the
-          # kernel flavour. Prefer it. If unavailable, find the binary installed
-          # by a linux-tools-* package and symlink it into /usr/local/bin to
-          # bypass the /usr/bin/bpftool wrapper (which fails when uname -r
-          # doesn't match the installed package's flavour suffix on Azure runners).
-          if sudo apt-get install -y --no-install-recommends bpftool 2>/dev/null; then
-            echo "Installed standalone bpftool"
+          # GitHub-hosted Azure runners pre-install linux-tools-<ver>-azure,
+          # so the bpftool binary already exists under /usr/lib/linux-tools/.
+          # However /usr/bin/bpftool is a wrapper that resolves the binary via
+          # `uname -r` literally; on Azure runners uname -r omits the -azure
+          # suffix, so the wrapper always fails. Bypass it by finding the real
+          # binary and symlinking it into /usr/local/bin (higher PATH priority).
+          BPFTOOL_BIN=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | head -1)
+          if [ -n "$BPFTOOL_BIN" ]; then
+            sudo ln -sf "$BPFTOOL_BIN" /usr/local/bin/bpftool
+            echo "bpftool → $BPFTOOL_BIN"
           else
-            KERNEL=$(uname -r)
-            TOOLS_PKG=$(apt-cache search --names-only "^linux-tools-${KERNEL}" 2>/dev/null | awk 'NR==1{print $1}')
-            [ -z "$TOOLS_PKG" ] && TOOLS_PKG="linux-tools-azure"
-            sudo apt-get install -y --no-install-recommends "$TOOLS_PKG" || \
-              sudo apt-get install -y --no-install-recommends linux-tools-generic
-            BPFTOOL_BIN=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | head -1)
-            if [ -n "$BPFTOOL_BIN" ]; then
-              sudo ln -sf "$BPFTOOL_BIN" /usr/local/bin/bpftool
-              echo "bpftool → $BPFTOOL_BIN"
-            fi
+            echo "bpftool not found under /usr/lib/linux-tools; falling back to apt"
+            sudo apt-get install -y --no-install-recommends linux-tools-generic
           fi
           bpftool version
 
