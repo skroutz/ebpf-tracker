@@ -30,29 +30,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm libelf-dev libbpf-dev \
             "linux-headers-$(uname -r)"
-          # Install the kernel tools package that provides bpftool.
-          # On Azure runners uname -r omits the flavour suffix (e.g. returns
-          # 6.17.0-1013 instead of 6.17.0-1013-azure), so apt-cache search is
-          # used to find the right versioned package by prefix. Falls back to
-          # linux-tools-azure then linux-tools-generic.
-          KERNEL=$(uname -r)
-          TOOLS_PKG=$(apt-cache search --names-only "^linux-tools-${KERNEL}" 2>/dev/null | awk 'NR==1{print $1}')
-          if [ -z "$TOOLS_PKG" ]; then
-            TOOLS_PKG="linux-tools-azure"
-          fi
-          sudo apt-get install -y --no-install-recommends "$TOOLS_PKG" || \
-            sudo apt-get install -y --no-install-recommends linux-tools-generic
-          # The Ubuntu /usr/bin/bpftool wrapper resolves the binary via uname -r
-          # literally, so it fails when the installed package has a different
-          # suffix. Use dpkg -L to find the exact installed path and symlink it
-          # into /usr/local/bin (which takes precedence over /usr/bin in PATH).
-          BPFTOOL_BIN=$(dpkg -L "$TOOLS_PKG" 2>/dev/null | grep -m1 '/bpftool$')
-          if [ -z "$BPFTOOL_BIN" ]; then
+          # On Ubuntu 24.04 bpftool is a standalone package independent of the
+          # kernel flavour. Prefer it. If unavailable, find the binary installed
+          # by a linux-tools-* package and symlink it into /usr/local/bin to
+          # bypass the /usr/bin/bpftool wrapper (which fails when uname -r
+          # doesn't match the installed package's flavour suffix on Azure runners).
+          if sudo apt-get install -y --no-install-recommends bpftool 2>/dev/null; then
+            echo "Installed standalone bpftool"
+          else
+            KERNEL=$(uname -r)
+            TOOLS_PKG=$(apt-cache search --names-only "^linux-tools-${KERNEL}" 2>/dev/null | awk 'NR==1{print $1}')
+            [ -z "$TOOLS_PKG" ] && TOOLS_PKG="linux-tools-azure"
+            sudo apt-get install -y --no-install-recommends "$TOOLS_PKG" || \
+              sudo apt-get install -y --no-install-recommends linux-tools-generic
             BPFTOOL_BIN=$(find /usr/lib/linux-tools -name bpftool 2>/dev/null | head -1)
-          fi
-          if [ -n "$BPFTOOL_BIN" ]; then
-            sudo ln -sf "$BPFTOOL_BIN" /usr/local/bin/bpftool
-            echo "bpftool → $BPFTOOL_BIN"
+            if [ -n "$BPFTOOL_BIN" ]; then
+              sudo ln -sf "$BPFTOOL_BIN" /usr/local/bin/bpftool
+              echo "bpftool → $BPFTOOL_BIN"
+            fi
           fi
           bpftool version
 
