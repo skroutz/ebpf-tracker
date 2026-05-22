@@ -31425,17 +31425,27 @@ const exec = __nccwpck_require__(5236);
 const fs = __nccwpck_require__(9896);
 
 const EVENTS_FILE = '/tmp/ebpf-network-events.json';
-const SHUTDOWN_TIMEOUT_MS = 5000;
+const SHUTDOWN_TIMEOUT_MS = 15000;
 const POLL_INTERVAL_MS = 100;
 
 function isAlive(pid) {
+  // Check both the saved PID (sudo) and any child named ebpf-tracker.
+  // The tracker has exited only when both are gone.
+  for (const p of [pid, -pid]) {
+    try {
+      process.kill(p, 0);
+      return true;
+    } catch (err) {
+      if (err.code === 'EPERM') return true; // exists but root-owned
+    }
+  }
+  // Also check if the ebpf-tracker child process is still running.
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM: process exists but is owned by root — still alive.
-    // ESRCH: process is gone.
-    return err.code === 'EPERM';
+    const { execSync } = __nccwpck_require__(5317);
+    const out = execSync(`pgrep -x ebpf-tracker 2>/dev/null || true`).toString().trim();
+    return out.length > 0;
+  } catch {
+    return false;
   }
 }
 
@@ -31464,15 +31474,13 @@ async function run() {
     return;
   }
 
-  // sudo(saved_pid) does not forward signals to its children by default.
-  // Signal the entire process group instead (negative PGID = saved sudo PID,
-  // since sudo is the group leader and !use_pty keeps the tracker in the
-  // same group). Both sudo and ebpf-tracker receive the signal.
-  core.info(`Sending SIGTERM to process group ${pid}`);
+  // Signal ebpf-tracker directly by name (covers both the case where sudo
+  // exec()d it directly and the case where it remains a child of sudo).
+  core.info(`Sending SIGTERM to ebpf-tracker (sudo PID ${pid})`);
   try {
-    await exec.exec('sudo', ['kill', '-TERM', '--', String(-pid)]);
+    await exec.exec('sudo', ['pkill', '-TERM', '-x', 'ebpf-tracker']);
   } catch (err) {
-    core.warning(`Could not signal process group ${pid}: ${err.message}`);
+    core.warning(`pkill SIGTERM failed: ${err.message}`);
   }
 
   // Poll for exit; escalate to SIGKILL if the process hasn't stopped in time.
@@ -31480,11 +31488,10 @@ async function run() {
   if (!exited) {
     core.warning(`Tracker did not exit within ${SHUTDOWN_TIMEOUT_MS}ms; sending SIGKILL`);
     try {
-      await exec.exec('sudo', ['kill', '-KILL', '--', String(-pid)]);
+      await exec.exec('sudo', ['pkill', '-KILL', '-x', 'ebpf-tracker']);
     } catch {
       // Already gone — that is fine.
     }
-    // Brief wait for the OS to reap the process after SIGKILL.
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
