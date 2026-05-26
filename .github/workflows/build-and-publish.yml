@@ -3,6 +3,7 @@ name: Build and Publish eBPF Tracker
 on:
   push:
     branches: [main]
+    tags: ['v*']
     paths-ignore:
       - '.github/workflows/test-tracker.yml'
   workflow_dispatch:
@@ -109,7 +110,7 @@ jobs:
         working-directory: tracker
         run: |
           oras push \
-            ghcr.io/skroutz/ebpf-tracker:latest \
+            ghcr.io/${{ github.repository_owner }}/ebpf-tracker:latest \
             ebpf-tracker:application/octet-stream \
             --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             --annotation "org.opencontainers.image.revision=${{ github.sha }}"
