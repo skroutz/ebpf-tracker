@@ -14,32 +14,110 @@ jobs:
       - name: Checkout
         uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 #v6.0.2
 
-      # s3 mode writes to /tmp/ebpf-network-events.json; no bucket = post step
-      # prints the file instead of uploading (no pipe-backpressure risk).
-      - name: Start eBPF tracker (file mode)
+      # ── PRE-TRACKER: make a TCP connection that will sit in TIME_WAIT by
+      #    the time the tracker starts. The proc scanner should retroactively
+      #    detect it on its first poll (~200 ms after BPF loads).
+      #    Using a raw Python socket avoids TLS overhead and gives us a precise
+      #    (ip, port) tuple to assert on later.
+      - name: Pre-tracker TCP connection (proc-scan validation)
+        run: |
+          python3 -c "
+          import socket, time
+          s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          s.settimeout(5)
+          s.connect(('1.1.1.1', 443))
+          s.close()
+          print('pre-tracker connection to 1.1.1.1:443 done')
+          "
+
+      # ── START TRACKER
+      #    proc-scan: 'true' (default) — polls /proc/net for TIME_WAIT
+      #    connections made in the step above.
+      - name: Start eBPF tracker
         uses: skroutz/ebpf-tracker@main
         with:
           output: s3
           # s3-bucket intentionally omitted — post step will print the file
 
-      - name: Generate TCP/IPv4 traffic (curl --ipv4)
+      # ── POST-TRACKER: exercise eBPF hooks ─────────────────────────────────
+
+      - name: eBPF — TCP/IPv4 (curl --ipv4)
         run: |
-          # Force IPv4 so fexit/tcp_v4_connect fires rather than tcp_v6_connect.
+          # fexit/tcp_v4_connect
           curl --ipv4 -sS --max-time 5 https://example.com -o /dev/null
-          curl --ipv4 -sS --max-time 5 https://github.com -o /dev/null
+          curl --ipv4 -sS --max-time 5 https://github.com  -o /dev/null
 
-      - name: Generate UDP traffic (dig direct to resolver)
+      - name: eBPF — UDP/IPv4 (dig direct-to-resolver)
         run: |
-          # @8.8.8.8 uses sendmsg() with a userspace msg_name pointer — exercises
-          # the kernel/user-pointer fallback in fentry/udp_sendmsg.
+          # fentry/udp_sendmsg with userspace msg_name pointer (sendmsg path)
           dig +short example.com @8.8.8.8
-          dig +short github.com @1.1.1.1
+          dig +short github.com  @1.1.1.1
 
-      - name: Generate TCP/IPv6 traffic (curl --ipv6)
+      - name: eBPF — TCP/IPv6 (curl --ipv6)
         run: |
-          # Exercises fexit/tcp_v6_connect separately.
+          # fexit/tcp_v6_connect — allow failure on IPv6-disabled runners
           curl --ipv6 -sS --max-time 5 https://example.com -o /dev/null || true
-          curl --ipv6 -sS --max-time 5 https://github.com -o /dev/null || true
 
-      - name: Wait for tracker to flush ring buffer
+      # Give the ring buffer and proc scanner time to flush all events before
+      # we read the file and before the post hook fires.
+      - name: Wait for tracker to flush
         run: sleep 3
+
+      # ── VALIDATE ──────────────────────────────────────────────────────────
+      #    Read /tmp/ebpf-network-events.json (0644, readable without sudo)
+      #    and assert that each hook path produced at least one event.
+      - name: Validate captured events
+        run: |
+          python3 << 'PYEOF'
+          import json, sys
+
+          try:
+              with open('/tmp/ebpf-network-events.json') as f:
+                  events = [json.loads(l) for l in f if l.strip()]
+          except FileNotFoundError:
+              print("FAIL: /tmp/ebpf-network-events.json not found", file=sys.stderr)
+              sys.exit(1)
+
+          tcp = [e for e in events if e['protocol'] == 'TCP']
+          udp = [e for e in events if e['protocol'] == 'UDP']
+
+          # eBPF TCP: curl makes IPv4 connections with ret == 0
+          ebpf_tcp = [e for e in tcp
+                      if e.get('process_name') == 'curl' and e.get('ret', -1) >= 0]
+
+          # eBPF UDP: dig's worker threads (isc-net-* or dig itself)
+          ebpf_udp = [e for e in udp
+                      if e.get('process_name', '').startswith(('dig', 'isc-net', 'isc-worker'))]
+
+          # proc-scan: pre-tracker connection to 1.1.1.1:443.
+          # The python3 process has already exited by the time the scanner polls,
+          # so the entry will be in TIME_WAIT with pid=0 / process_name=''.
+          # We match on dst_ip + dst_port only.
+          proc_scan = [e for e in tcp
+                       if e.get('dst_ip') == '1.1.1.1' and e.get('dst_port') == 443]
+
+          print(f"Total events              : {len(events)}")
+          print(f"eBPF TCP (curl)           : {len(ebpf_tcp)}")
+          print(f"eBPF UDP (dig)            : {len(ebpf_udp)}")
+          print(f"proc-scan 1.1.1.1:443     : {len(proc_scan)}")
+
+          # Show the first proc-scan hit for inspection
+          if proc_scan:
+              print(f"  sample: {proc_scan[0]}")
+
+          failures = []
+          if not ebpf_tcp:
+              failures.append("eBPF TCP: no successful curl events found")
+          if not ebpf_udp:
+              failures.append("eBPF UDP: no dig/DNS events found")
+          if not proc_scan:
+              failures.append("proc-scan: no TIME_WAIT event for 1.1.1.1:443 found")
+
+          if failures:
+              for msg in failures:
+                  print(f"FAIL: {msg}", file=sys.stderr)
+              sys.exit(1)
+
+          print("All checks passed.")
+          PYEOF
+
