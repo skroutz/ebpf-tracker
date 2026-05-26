@@ -28,6 +28,93 @@ async function waitForExit() {
   return false;
 }
 
+// Parse an NDJSON file into an array of objects, skipping blank/invalid lines.
+function parseEventsNDJSON(filePath) {
+  try {
+    return fs
+      .readFileSync(filePath, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => {
+        try { return JSON.parse(l); } catch { return null; }
+      })
+      .filter(Boolean);
+  } catch (err) {
+    core.warning(`Could not read events file: ${err.message}`);
+    return [];
+  }
+}
+
+// Write a markdown summary table to GITHUB_STEP_SUMMARY.
+function printStepSummary(events) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (!summaryPath) return;
+
+  const repo     = process.env.GITHUB_REPOSITORY || 'N/A';
+  const workflow = process.env.GITHUB_WORKFLOW   || 'N/A';
+  const runId    = process.env.GITHUB_RUN_ID     || 'N/A';
+
+  // Aggregate stats.
+  const uniqueDsts = new Set(events.map((e) => e.destination?.ip)).size;
+  const byProto = {};
+  for (const e of events) {
+    const p = e.network?.protocol || 'unknown';
+    byProto[p] = (byProto[p] || 0) + 1;
+  }
+  const protoLine =
+    Object.entries(byProto)
+      .sort(([, a], [, b]) => b - a)
+      .map(([k, v]) => `\`${k}\`:${v}`)
+      .join(', ') || 'none';
+
+  // Header / metadata block.
+  const metadataMd =
+    '## eBPF Network Tracker Report\n\n' +
+    '| Repository | Workflow | Run ID |\n' +
+    '| --- | --- | --- |\n' +
+    `| ${repo} | ${workflow} | ${runId} |\n\n` +
+    '| Total Events | Unique Destination IPs | Protocols |\n' +
+    '| --- | --- | --- |\n' +
+    `| ${events.length} | ${uniqueDsts} | ${protoLine} |\n\n` +
+    '---\n\n';
+
+  // Connection table.
+  const columns = [
+    'Timestamp', 'Protocol',
+    'Source IP', 'Src Port',
+    'Destination IP', 'Dst Port',
+    'PID', 'Process', 'UID',
+  ];
+
+  const mdRows = [];
+  mdRows.push(`| ${columns.join(' | ')} |`);
+  mdRows.push(`| ${columns.map(() => '---').join(' | ')} |`);
+
+  for (const e of events) {
+    const row = [
+      e.timestamp             || 'N/A',
+      e.network?.protocol     || 'N/A',
+      e.source?.ip            || 'N/A',
+      e.source?.port          ?? 'N/A',
+      e.destination?.ip       || 'N/A',
+      e.destination?.port     ?? 'N/A',
+      e.process?.pid          ?? 'N/A',
+      e.process?.name         || 'N/A',
+      e.user?.id              || 'N/A',
+    ];
+    mdRows.push(`| ${row.join(' | ')} |`);
+  }
+
+  try {
+    fs.appendFileSync(summaryPath, metadataMd);
+    fs.appendFileSync(summaryPath, '## Network Events\n\n');
+    fs.appendFileSync(summaryPath, mdRows.join('\n'));
+    fs.appendFileSync(summaryPath, '\n\n---\n');
+  } catch (err) {
+    core.warning(`Could not write step summary: ${err.message}`);
+  }
+}
+
 async function run() {
   const pidStr = core.getState('TRACKER_PID');
   const outputMode = core.getState('OUTPUT_MODE') || 's3';
@@ -67,6 +154,12 @@ async function run() {
   if (outputMode === 'stdio') {
     core.info('Output mode is stdio; skipping S3 upload');
     return;
+  }
+
+  // Print a markdown summary table to the Actions step summary page.
+  if (fs.existsSync(EVENTS_FILE)) {
+    const events = parseEventsNDJSON(EVENTS_FILE);
+    printStepSummary(events);
   }
 
   if (!s3Bucket) {
