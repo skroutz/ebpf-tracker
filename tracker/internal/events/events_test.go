@@ -199,38 +199,38 @@ func TestFormat_Schema_TCP4(t *testing.T) {
 	e, _ := events.Parse(raw)
 	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 
-	if j.Protocol != "TCP" {
-		t.Errorf("protocol: got %q, want \"TCP\"", j.Protocol)
+	if j.Network.Protocol != "tcp" {
+		t.Errorf("network.protocol: got %q, want \"tcp\"", j.Network.Protocol)
 	}
-	if j.SrcIP != "10.1.0.5" {
-		t.Errorf("src_ip: got %q, want \"10.1.0.5\"", j.SrcIP)
+	if j.Source.IP != "10.1.0.5" {
+		t.Errorf("source.ip: got %q, want \"10.1.0.5\"", j.Source.IP)
 	}
-	if j.DstIP != "93.184.216.34" {
-		t.Errorf("dst_ip: got %q, want \"93.184.216.34\"", j.DstIP)
+	if j.Destination.IP != "93.184.216.34" {
+		t.Errorf("destination.ip: got %q, want \"93.184.216.34\"", j.Destination.IP)
 	}
-	if j.SrcPort != 54321 {
-		t.Errorf("src_port: got %d, want 54321", j.SrcPort)
+	if j.Source.Port != 54321 {
+		t.Errorf("source.port: got %d, want 54321", j.Source.Port)
 	}
-	if j.DstPort != 443 {
-		t.Errorf("dst_port: got %d, want 443", j.DstPort)
+	if j.Destination.Port != 443 {
+		t.Errorf("destination.port: got %d, want 443", j.Destination.Port)
 	}
-	if j.Pid != 1234 {
-		t.Errorf("pid: got %d, want 1234", j.Pid)
+	if j.Process.Pid != 1234 {
+		t.Errorf("process.pid: got %d, want 1234", j.Process.Pid)
 	}
-	if j.ProcessName != "curl" {
-		t.Errorf("process_name: got %q, want \"curl\"", j.ProcessName)
+	if j.Process.Name != "curl" {
+		t.Errorf("process.name: got %q, want \"curl\"", j.Process.Name)
 	}
-	if j.Uid != 1001 {
-		t.Errorf("uid: got %d, want 1001", j.Uid)
+	if j.User.ID != "1001" {
+		t.Errorf("user.id: got %q, want \"1001\"", j.User.ID)
 	}
-	if j.RunID != "test-run-id" {
-		t.Errorf("run_id: got %q, want \"test-run-id\"", j.RunID)
+	if j.Event.ID != "test-run-id" {
+		t.Errorf("event.id: got %q, want \"test-run-id\"", j.Event.ID)
 	}
-	if j.Repository != "skroutz/my-repo" {
-		t.Errorf("repository: got %q, want \"skroutz/my-repo\"", j.Repository)
+	if j.GitHub.Repository != "skroutz/my-repo" {
+		t.Errorf("github.repository: got %q, want \"skroutz/my-repo\"", j.GitHub.Repository)
 	}
-	if j.WorkflowName != "CI" {
-		t.Errorf("workflow_name: got %q, want \"CI\"", j.WorkflowName)
+	if j.GitHub.WorkflowID != "CI" {
+		t.Errorf("github.workflow_id: got %q, want \"CI\"", j.GitHub.WorkflowID)
 	}
 }
 
@@ -240,8 +240,8 @@ func TestFormat_RunID_Propagated(t *testing.T) {
 
 	for _, id := range []string{"12345678", "local", ""} {
 		j := events.Format(e, fixedBoot,id, "skroutz/my-repo", "CI")
-		if j.RunID != id {
-			t.Errorf("run_id: got %q, want %q", j.RunID, id)
+		if j.Event.ID != id {
+			t.Errorf("event.id: got %q, want %q", j.Event.ID, id)
 		}
 	}
 }
@@ -251,11 +251,11 @@ func TestFormat_RepositoryAndWorkflow_Propagated(t *testing.T) {
 	e, _ := events.Parse(raw)
 
 	j := events.Format(e, fixedBoot, "42", "skroutz/ebpf-tracker", "Build and Publish")
-	if j.Repository != "skroutz/ebpf-tracker" {
-		t.Errorf("repository: got %q, want \"skroutz/ebpf-tracker\"", j.Repository)
+	if j.GitHub.Repository != "skroutz/ebpf-tracker" {
+		t.Errorf("github.repository: got %q, want \"skroutz/ebpf-tracker\"", j.GitHub.Repository)
 	}
-	if j.WorkflowName != "Build and Publish" {
-		t.Errorf("workflow_name: got %q, want \"Build and Publish\"", j.WorkflowName)
+	if j.GitHub.WorkflowID != "Build and Publish" {
+		t.Errorf("github.workflow_id: got %q, want \"Build and Publish\"", j.GitHub.WorkflowID)
 	}
 }
 
@@ -263,8 +263,8 @@ func TestFormat_Protocol_UDP(t *testing.T) {
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 53, 1, 0, 0, events.ProtoUDP, events.AFINET, "dig")
 	e, _ := events.Parse(raw)
 	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
-	if j.Protocol != "UDP" {
-		t.Errorf("protocol: got %q, want \"UDP\"", j.Protocol)
+	if j.Network.Protocol != "udp" {
+		t.Errorf("network.protocol: got %q, want \"udp\"", j.Network.Protocol)
 	}
 }
 
@@ -274,11 +274,11 @@ func TestFormat_Protocol_Unknown(t *testing.T) {
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, 0, 132 /* SCTP */, events.AFINET, "")
 	e, _ := events.Parse(raw)
 	j := events.Format(e, fixedBoot, "", "", "")
-	if j.Protocol == "UDP" || j.Protocol == "TCP" {
-		t.Errorf("unknown protocol silently mapped to %q, want \"unknown(132)\"", j.Protocol)
+	if j.Network.Protocol == "udp" || j.Network.Protocol == "tcp" {
+		t.Errorf("unknown protocol silently mapped to %q, want \"unknown(132)\"", j.Network.Protocol)
 	}
-	if j.Protocol != "unknown(132)" {
-		t.Errorf("protocol: got %q, want \"unknown(132)\"", j.Protocol)
+	if j.Network.Protocol != "unknown(132)" {
+		t.Errorf("network.protocol: got %q, want \"unknown(132)\"", j.Network.Protocol)
 	}
 }
 
@@ -293,12 +293,12 @@ func TestFormat_CommInvalidUTF8(t *testing.T) {
 	e, _ := events.Parse(raw)
 	j := events.Format(e, fixedBoot, "", "", "")
 
-	if !utf8.ValidString(j.ProcessName) {
-		t.Errorf("process_name %q is not valid UTF-8", j.ProcessName)
+	if !utf8.ValidString(j.Process.Name) {
+		t.Errorf("process.name %q is not valid UTF-8", j.Process.Name)
 	}
 	// The replacement rune must appear in place of the invalid bytes.
-	if !strings.Contains(j.ProcessName, string(utf8.RuneError)) {
-		t.Errorf("expected replacement rune in process_name, got %q", j.ProcessName)
+	if !strings.Contains(j.Process.Name, string(utf8.RuneError)) {
+		t.Errorf("expected replacement rune in process.name, got %q", j.Process.Name)
 	}
 }
 
@@ -348,8 +348,8 @@ func TestFormat_CommNullTerminated(t *testing.T) {
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "python3")
 	e, _ := events.Parse(raw)
 	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
-	if j.ProcessName != "python3" {
-		t.Errorf("process_name: got %q, want \"python3\"", j.ProcessName)
+	if j.Process.Name != "python3" {
+		t.Errorf("process.name: got %q, want \"python3\"", j.Process.Name)
 	}
 }
 
@@ -361,8 +361,8 @@ func TestFormat_CommFull16Bytes(t *testing.T) {
 	copy(raw[66:82], comm[:])
 	e, _ := events.Parse(raw)
 	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
-	if j.ProcessName != "systemd-resolved" {
-		t.Errorf("process_name: got %q, want \"systemd-resolved\"", j.ProcessName)
+	if j.Process.Name != "systemd-resolved" {
+		t.Errorf("process.name: got %q, want \"systemd-resolved\"", j.Process.Name)
 	}
 }
 
@@ -376,11 +376,11 @@ func TestFormat_IPv6Addresses(t *testing.T) {
 	e, _ := events.Parse(raw)
 	j := events.Format(e, fixedBoot, "test-run-id", "skroutz/my-repo", "CI")
 
-	if j.SrcIP != "::1" {
-		t.Errorf("src_ip: got %q, want \"::1\"", j.SrcIP)
+	if j.Source.IP != "::1" {
+		t.Errorf("source.ip: got %q, want \"::1\"", j.Source.IP)
 	}
-	if j.DstIP != "2001:db8::1" {
-		t.Errorf("dst_ip: got %q, want \"2001:db8::1\"", j.DstIP)
+	if j.Destination.IP != "2001:db8::1" {
+		t.Errorf("destination.ip: got %q, want \"2001:db8::1\"", j.Destination.IP)
 	}
 }
 
@@ -414,9 +414,8 @@ func TestMarshal_IsValidJSON(t *testing.T) {
 
 func TestMarshal_RequiredFieldsPresent(t *testing.T) {
 	required := []string{
-		"timestamp", "run_id", "repository", "workflow_name",
-		"protocol", "src_ip", "src_port",
-		"dst_ip", "dst_port", "pid", "process_name", "uid", "ret",
+		"timestamp", "network", "source", "destination",
+		"process", "user", "event", "github",
 	}
 
 	raw := buildRaw(0, 0, 0, [16]byte{}, [16]byte{}, 0, 0, 0, 0, 0, events.ProtoTCP, events.AFINET, "")

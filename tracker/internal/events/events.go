@@ -47,21 +47,57 @@ type RawEvent struct {
 	Comm        [16]byte
 }
 
+// The following types follow the Elastic Common Schema (ECS) namespace
+// structure. Each nested struct maps to one top-level ECS namespace.
+
+// NetworkFields holds ECS network.* fields.
+type NetworkFields struct {
+	Protocol string `json:"protocol"` // "tcp", "udp", or "unknown(<n>)"
+}
+
+// EndpointFields holds ECS source.* / destination.* fields.
+type EndpointFields struct {
+	IP   string `json:"ip"`
+	Port uint16 `json:"port"`
+}
+
+// ProcessFields holds ECS process.* fields.
+type ProcessFields struct {
+	Pid      uint32 `json:"pid"`
+	Name     string `json:"name"`
+	ExitCode int32  `json:"exit_code"` // kernel return value: 0 = success, negative = errno
+}
+
+// UserFields holds ECS user.* fields.
+type UserFields struct {
+	ID string `json:"id"` // Linux UID as string (ECS keyword type)
+}
+
+// EventFields holds ECS event.* fields.
+type EventFields struct {
+	ID   string `json:"id"`   // GitHub run ID
+	Type string `json:"type"` // always "connection"
+}
+
+// GitHubFields holds custom github.* fields for workflow correlation.
+type GitHubFields struct {
+	URL           string `json:"url"`             // e.g. https://github.com/org/repo/actions/runs/123/
+	Repository    string `json:"repository"`      // GITHUB_REPOSITORY
+	WorkflowID    string `json:"workflow_id"`     // GITHUB_WORKFLOW
+	WorkflowRunID string `json:"workflow_run_id"` // GITHUB_RUN_ID (mirrors event.id)
+}
+
 // JSONEvent is the canonical JSONL record written to the output file.
+// Field names are ECS-aligned for direct ingestion into Elastic SIEM.
 type JSONEvent struct {
-	Timestamp    string `json:"timestamp"`
-	RunID        string `json:"run_id"`
-	Repository   string `json:"repository"`
-	WorkflowName string `json:"workflow_name"`
-	Protocol     string `json:"protocol"`
-	SrcIP        string `json:"src_ip"`
-	SrcPort      uint16 `json:"src_port"`
-	DstIP        string `json:"dst_ip"`
-	DstPort      uint16 `json:"dst_port"`
-	Pid          uint32 `json:"pid"`
-	ProcessName  string `json:"process_name"`
-	Uid          uint32 `json:"uid"`
-	Ret          int32  `json:"ret"` // kernel return value (TCP only; always 0 for UDP)
+	Timestamp   string         `json:"timestamp"`
+	Network     NetworkFields  `json:"network"`
+	Source      EndpointFields `json:"source"`
+	Destination EndpointFields `json:"destination"`
+	Process     ProcessFields  `json:"process"`
+	User        UserFields     `json:"user"`
+	Event       EventFields    `json:"event"`
+	GitHub      GitHubFields   `json:"github"`
 }
 
 // Parse decodes a raw ring buffer byte slice into a RawEvent.
@@ -105,20 +141,42 @@ func Format(e RawEvent, bootTime time.Time, runID, repository, workflowName stri
 		dstIP = ip6str(e.DstIP6)
 	}
 
+	ghURL := ""
+	if repository != "" && runID != "" && runID != "local" {
+		ghURL = "https://github.com/" + repository + "/actions/runs/" + runID + "/"
+	}
+
 	return JSONEvent{
-		Timestamp:    ts.Format(time.RFC3339),
-		RunID:        runID,
-		Repository:   repository,
-		WorkflowName: workflowName,
-		Protocol:     protoName(e.Proto),
-		SrcIP:        srcIP,
-		SrcPort:      e.SrcPort,
-		DstIP:        dstIP,
-		DstPort:      e.DstPort,
-		Pid:          e.Pid,
-		ProcessName:  commStr(e.Comm),
-		Uid:          e.Uid,
-		Ret:          e.Ret,
+		Timestamp: ts.Format(time.RFC3339),
+		Network: NetworkFields{
+			Protocol: protoName(e.Proto),
+		},
+		Source: EndpointFields{
+			IP:   srcIP,
+			Port: e.SrcPort,
+		},
+		Destination: EndpointFields{
+			IP:   dstIP,
+			Port: e.DstPort,
+		},
+		Process: ProcessFields{
+			Pid:      e.Pid,
+			Name:     commStr(e.Comm),
+			ExitCode: e.Ret,
+		},
+		User: UserFields{
+			ID: strconv.FormatUint(uint64(e.Uid), 10),
+		},
+		Event: EventFields{
+			ID:   runID,
+			Type: "connection",
+		},
+		GitHub: GitHubFields{
+			URL:           ghURL,
+			Repository:    repository,
+			WorkflowID:    workflowName,
+			WorkflowRunID: runID,
+		},
 	}
 }
 
@@ -170,9 +228,9 @@ func BootTime() (time.Time, error) {
 func protoName(p uint8) string {
 	switch p {
 	case ProtoTCP:
-		return "TCP"
+		return "tcp"
 	case ProtoUDP:
-		return "UDP"
+		return "udp"
 	default:
 		return fmt.Sprintf("unknown(%d)", p)
 	}

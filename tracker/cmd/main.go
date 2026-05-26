@@ -190,7 +190,7 @@ func main() {
 		mu.Unlock()
 		// Register in the shared dedup map so the proc scanner does not
 		// re-emit this connection on its next poll cycle.
-		dedup.Record(je.Pid, je.Protocol, je.SrcIP, je.SrcPort, je.DstIP, je.DstPort)
+		dedup.Record(je.Process.Pid, je.Network.Protocol, je.Source.IP, je.Source.Port, je.Destination.IP, je.Destination.Port)
 	}
 
 	log.Println("ebpf-tracker stopped")

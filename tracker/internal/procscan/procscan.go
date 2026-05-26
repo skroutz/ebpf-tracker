@@ -251,9 +251,9 @@ func parseProcNet(path string, isIPv6, isUDP bool, inodes map[string]inodeInfo) 
 	if isIPv6 {
 		zeroRemote = strings.Repeat("0", 32)
 	}
-	proto := "TCP"
+	proto := "tcp"
 	if isUDP {
-		proto = "UDP"
+		proto = "udp"
 	}
 
 	var out []connEntry
@@ -394,6 +394,11 @@ func (s *Scanner) poll() {
 		{"/proc/net/udp6", true, true},
 	}
 
+	ghURL := ""
+	if s.repository != "" && s.runID != "" && s.runID != "local" {
+		ghURL = "https://github.com/" + s.repository + "/actions/runs/" + s.runID + "/"
+	}
+
 	var lines [][]byte
 	for _, src := range sources {
 		for _, e := range parseProcNet(src.path, src.isIPv6, src.isUDP, inodes) {
@@ -401,19 +406,36 @@ func (s *Scanner) poll() {
 				continue
 			}
 			je := events.JSONEvent{
-				Timestamp:    now,
-				RunID:        s.runID,
-				Repository:   s.repository,
-				WorkflowName: s.workflowName,
-				Protocol:     e.proto,
-				SrcIP:        e.srcIP,
-				SrcPort:      e.srcPort,
-				DstIP:        e.dstIP,
-				DstPort:      e.dstPort,
-				Pid:          e.pid,
-				ProcessName:  e.comm,
-				Uid:          e.uid,
-				Ret:          0,
+				Timestamp: now,
+				Network: events.NetworkFields{
+					Protocol: e.proto,
+				},
+				Source: events.EndpointFields{
+					IP:   e.srcIP,
+					Port: e.srcPort,
+				},
+				Destination: events.EndpointFields{
+					IP:   e.dstIP,
+					Port: e.dstPort,
+				},
+				Process: events.ProcessFields{
+					Pid:      e.pid,
+					Name:     e.comm,
+					ExitCode: 0,
+				},
+				User: events.UserFields{
+					ID: strconv.FormatUint(uint64(e.uid), 10),
+				},
+				Event: events.EventFields{
+					ID:   s.runID,
+					Type: "connection",
+				},
+				GitHub: events.GitHubFields{
+					URL:           ghURL,
+					Repository:    s.repository,
+					WorkflowID:    s.workflowName,
+					WorkflowRunID: s.runID,
+				},
 			}
 			line, err := events.Marshal(je)
 			if err != nil {
