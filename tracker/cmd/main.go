@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,12 +23,15 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 
 	"github.com/skroutz/ebpf-tracker/internal/events"
+	"github.com/skroutz/ebpf-tracker/internal/procscan"
 )
 
 const defaultOutputFile = "/tmp/ebpf-network-events.json"
 
 func main() {
 	outputFile := flag.String("output", defaultOutputFile, "path to JSONL output file, or '-' for stdout")
+	procScanInterval := flag.Duration("proc-scan-interval", 200*time.Millisecond,
+		"how often to poll /proc/net for pre-existing connections (0 to disable)")
 	flag.Parse()
 
 	runID := os.Getenv("GITHUB_RUN_ID")
@@ -106,6 +110,7 @@ func main() {
 	}()
 
 	var w *bufio.Writer
+	var mu sync.Mutex
 	if *outputFile == "-" {
 		w = bufio.NewWriterSize(os.Stdout, 64*1024)
 		log.Printf("ebpf-tracker running, writing to stdout")
@@ -133,6 +138,14 @@ func main() {
 
 	if *outputFile != "-" {
 		log.Printf("ebpf-tracker running, writing to %s", *outputFile)
+	}
+
+	// Start the /proc/net scanner unless disabled.
+	dedup := procscan.NewDedup(5 * time.Minute)
+	if *procScanInterval > 0 {
+		scanner := procscan.NewScanner(*procScanInterval, dedup, w, &mu, runID, repository, workflowName)
+		go scanner.Run(ctx)
+		log.Printf("proc scanner running (interval: %s)", *procScanInterval)
 	}
 
 	// Set a past deadline on the reader when the signal fires so rd.Read()
@@ -166,6 +179,7 @@ func main() {
 			log.Printf("marshal event: %v", err)
 			continue
 		}
+		mu.Lock()
 		w.Write(line)
 		w.WriteByte('\n')
 		// In stdio mode flush immediately so events are visible in the runner
@@ -173,6 +187,10 @@ func main() {
 		if *outputFile == "-" {
 			w.Flush()
 		}
+		mu.Unlock()
+		// Register in the shared dedup map so the proc scanner does not
+		// re-emit this connection on its next poll cycle.
+		dedup.Record(je.Pid, je.Protocol, je.SrcIP, je.SrcPort, je.DstIP, je.DstPort)
 	}
 
 	log.Println("ebpf-tracker stopped")

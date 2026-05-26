@@ -81,7 +81,11 @@ async function run() {
     await exec.exec('sudo', ['visudo', '-c', '-f', '/etc/sudoers.d/ebpf-tracker']);
 
     const isStdio = outputMode === 'stdio';
-    const args = isStdio ? ['--output', '-'] : [];
+    const procScan = core.getInput('proc-scan') !== 'false';
+    const args = [
+      ...(isStdio ? ['--output', '-'] : []),
+      ...(procScan ? [] : ['--proc-scan-interval', '0']),
+    ];
 
     // In stdio mode use 'inherit' so the tracker writes directly to the
     // runner's stdout/stderr. Using 'pipe' would keep the Node.js event loop

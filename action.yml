@@ -14,6 +14,10 @@ inputs:
     options:
       - s3
       - stdio
+  proc-scan:
+    description: 'Poll /proc/net every 200 ms to capture connections established before the tracker step started (e.g. OIDC credential calls, git fetch). Set to "false" to disable.'
+    required: false
+    default: 'true'
 
 runs:
   using: 'node24'
