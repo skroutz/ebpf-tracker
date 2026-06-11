@@ -1,0 +1,110 @@
+name: Dogfood — binary caching
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'dist/**'
+      - 'action.yml'
+      - 'package.json'
+      - '.github/workflows/dogfood-caching.yml'
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: cold run on a fresh hosted runner — ORAS is downloaded, the tracker
+  #        is pulled via oras, and both are saved to the Actions cache.
+  # ---------------------------------------------------------------------------
+  cold:
+    name: Cold run (populate caches)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      oras-source: ${{ steps.tracker.outputs.oras-source }}
+      tracker-source: ${{ steps.tracker.outputs.tracker-source }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 #v6.0.2
+
+      - name: Start eBPF tracker (local action)
+        id: tracker
+        uses: ./
+        with:
+          output: stdio
+          # On a PR, GITHUB_ACTION_REF would resolve to the PR head SHA, which
+          # is never published to the registry — pin to a tag that exists.
+          version: latest
+
+      - name: Report sources
+        run: |
+          echo "oras-source:    ${{ steps.tracker.outputs.oras-source }}"
+          echo "tracker-source: ${{ steps.tracker.outputs.tracker-source }}"
+
+      - name: Generate traffic
+        run: |
+          curl --ipv4 -sS --max-time 5 https://example.com -o /dev/null
+          dig +short example.com @1.1.1.1
+          sleep 3
+
+  # ---------------------------------------------------------------------------
+  # Job 2: warm run — a different runner, but the Actions cache entries written
+  #        by the cold job must now be hit for both binaries. Fails the build
+  #        if either binary was fetched from the network again.
+  # ---------------------------------------------------------------------------
+  warm:
+    name: Warm run (assert cache hits)
+    needs: cold
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@900f2210b1d28bbbd0bd22d17926b9e224e8f231 #v6.0.2
+
+      - name: Start eBPF tracker (local action)
+        id: tracker
+        uses: ./
+        with:
+          output: stdio
+          # Same tag as the cold job so the digest-keyed cache entry matches.
+          version: latest
+
+      - name: Generate traffic
+        run: |
+          curl --ipv4 -sS --max-time 5 https://example.com -o /dev/null
+          sleep 3
+
+      - name: Assert cache hits
+        env:
+          ORAS_SOURCE: ${{ steps.tracker.outputs.oras-source }}
+          TRACKER_SOURCE: ${{ steps.tracker.outputs.tracker-source }}
+          COLD_ORAS_SOURCE: ${{ needs.cold.outputs.oras-source }}
+          COLD_TRACKER_SOURCE: ${{ needs.cold.outputs.tracker-source }}
+        run: |
+          echo "cold: oras=${COLD_ORAS_SOURCE} tracker=${COLD_TRACKER_SOURCE}"
+          echo "warm: oras=${ORAS_SOURCE} tracker=${TRACKER_SOURCE}"
+          fail=0
+
+          # The cold job must have actually exercised the network paths,
+          # otherwise the warm assertions prove nothing.
+          if [ "${COLD_TRACKER_SOURCE}" != "pull" ]; then
+            echo "::warning::cold tracker-source was '${COLD_TRACKER_SOURCE}', expected 'pull' — cache already warm from a previous run"
+          fi
+
+          # Warm job: tracker must come from the Actions cache.
+          if [ "${TRACKER_SOURCE}" != "cache" ]; then
+            echo "::error::warm tracker-source was '${TRACKER_SOURCE}', expected 'cache'"
+            fail=1
+          fi
+
+          # Warm job: ORAS must not be downloaded again ('cache' on hosted
+          # runners; 'path'/'tool-cache' acceptable on preinstalled runners).
+          if [ "${ORAS_SOURCE}" = "download" ]; then
+            echo "::error::warm oras-source was 'download', expected a cache hit"
+            fail=1
+          fi
+
+          exit $fail

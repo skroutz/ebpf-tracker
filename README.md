@@ -122,6 +122,16 @@ Omit `s3-bucket` to have `post.js` print the captured events directly to the Act
     # s3-bucket omitted — events are printed to the log at job end
 ```
 
+### Pinning the binary version
+
+By default the binary tag is resolved from the action ref (`GITHUB_ACTION_REF`), so `uses: skroutz/ebpf-tracker@v1.2.0` pulls the `v1.2.0` binary. The `version` input overrides this when the binary version needs to be decoupled from the action version:
+
+```yaml
+- uses: skroutz/ebpf-tracker@v1.2.0
+  with:
+    version: latest   # pull the latest published binary regardless of action ref
+```
+
 ### AWS credentials
 
 The runner must have `s3:PutObject` on the target bucket. The recommended approach is OIDC:

@@ -1,18 +1,158 @@
-const core = require('@actions/core');
-const exec = require('@actions/exec');
-const tc = require('@actions/tool-cache');
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+import * as core from '@actions/core';
+import * as exec from '@actions/exec';
+import * as tc from '@actions/tool-cache';
+import * as cache from '@actions/cache';
+import { spawn } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 const TRACKER_PATH = '/tmp/ebpf-tracker';
 const PID_FILE = '/tmp/ebpf-tracker.pid';
 const EVENTS_FILE = '/tmp/ebpf-network-events.json';
-// Resolve the binary tag from the action ref so that
-// `uses: skroutz/ebpf-tracker@v1.2.3` always pulls the v1.2.3 binary.
-// Falls back to 'latest' when run outside of Actions (e.g. local testing).
-const actionRef = process.env.GITHUB_ACTION_REF || 'latest';
-const IMAGE = `ghcr.io/skroutz/ebpf-tracker:${actionRef}`;
+const IMAGE_REPO = 'ghcr.io/skroutz/ebpf-tracker';
+const ORAS_VERSION = '1.2.3';
+
+/**
+ * Resolve the binary tag to pull. The `version` input is an explicit override;
+ * otherwise the tag follows the action ref so that
+ * `uses: skroutz/ebpf-tracker@v1.2.3` always pulls the v1.2.3 binary.
+ * Falls back to 'latest' when run outside of Actions (e.g. local testing).
+ */
+function resolveVersion() {
+  return core.getInput('version') || process.env.GITHUB_ACTION_REF || 'latest';
+}
+
+/**
+ * Make the ORAS CLI available on PATH, fastest source first:
+ *   1. already on PATH
+ *   2. runner tool cache (persists between jobs on self-hosted runners)
+ *   3. GitHub Actions cache (persists between jobs on hosted runners)
+ *   4. download from GitHub releases
+ * After a download the binary is registered in the tool cache and saved to
+ * the Actions cache so subsequent jobs hit a cache instead of the network.
+ * Returns the source the binary came from: 'path' | 'tool-cache' | 'cache' |
+ * 'download' (also exposed as the oras-source action output).
+ */
+async function installOras() {
+  try {
+    await exec.exec('oras', ['version'], { silent: true });
+    return 'path';
+  } catch {
+    core.info('ORAS not found on PATH; resolving from cache or download...');
+  }
+
+  let toolDir = tc.find('oras', ORAS_VERSION);
+  if (toolDir) {
+    core.info(`ORAS ${ORAS_VERSION} found in runner tool cache`);
+    core.addPath(toolDir);
+    return 'tool-cache';
+  }
+
+  const cacheKey = `oras-${ORAS_VERSION}-${process.platform}-${process.arch}`;
+  const stagingDir = path.join(process.env.RUNNER_TEMP || '/tmp', `oras-${ORAS_VERSION}`);
+
+  let restoredKey;
+  try {
+    restoredKey = await cache.restoreCache([stagingDir], cacheKey);
+  } catch (err) {
+    core.warning(`Actions cache restore failed: ${err.message}`);
+  }
+
+  if (restoredKey && fs.existsSync(path.join(stagingDir, 'oras'))) {
+    core.info(`ORAS ${ORAS_VERSION} restored from Actions cache (key: ${restoredKey})`);
+    toolDir = await tc.cacheDir(stagingDir, 'oras', ORAS_VERSION);
+    core.addPath(toolDir);
+    return 'cache';
+  }
+
+  core.info(`Downloading ORAS ${ORAS_VERSION}...`);
+  const url = `https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz`;
+  const tarball = await tc.downloadTool(url);
+  const extractedDir = await tc.extractTar(tarball);
+  toolDir = await tc.cacheDir(extractedDir, 'oras', ORAS_VERSION);
+  core.addPath(toolDir);
+  core.info(`ORAS installed at ${toolDir}`);
+
+  try {
+    fs.mkdirSync(stagingDir, { recursive: true });
+    fs.copyFileSync(path.join(toolDir, 'oras'), path.join(stagingDir, 'oras'));
+    fs.chmodSync(path.join(stagingDir, 'oras'), 0o755);
+    await cache.saveCache([stagingDir], cacheKey);
+    core.info(`ORAS saved to Actions cache (key: ${cacheKey})`);
+  } catch (err) {
+    // ReserveCacheError (a parallel job already saved this key) or transient
+    // service errors — never fail the action over a cache write.
+    core.warning(`Actions cache save failed: ${err.message}`);
+  }
+  return 'download';
+}
+
+/**
+ * Resolve the manifest digest the given tag currently points to.
+ * Returns e.g. "sha256:abc..." or null if resolution fails.
+ */
+async function resolveImageDigest(image) {
+  let stdout = '';
+  try {
+    await exec.exec('oras', ['resolve', image], {
+      silent: true,
+      listeners: { stdout: (data) => { stdout += data.toString(); } },
+    });
+    const digest = stdout.trim();
+    return /^sha256:[0-9a-f]{64}$/.test(digest) ? digest : null;
+  } catch (err) {
+    core.warning(`Could not resolve digest for ${image}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fetch the tracker binary to TRACKER_PATH. A mutable tag ("latest") can move
+ * between runs, so the tag alone is never a safe cache key — instead resolve
+ * the digest the tag points to right now and key the Actions cache on that.
+ * Same digest → restore the cached binary; new digest → fresh oras pull and
+ * cache it under the new key.
+ * Returns 'cache' | 'pull' (also exposed as the tracker-source action output).
+ */
+async function installTracker(version) {
+  const image = `${IMAGE_REPO}:${version}`;
+  const digest = await resolveImageDigest(image);
+
+  let cacheKey;
+  if (digest) {
+    cacheKey = `ebpf-tracker-${digest}-${process.platform}-${process.arch}`;
+    try {
+      const restoredKey = await cache.restoreCache([TRACKER_PATH], cacheKey);
+      if (restoredKey && fs.existsSync(TRACKER_PATH)) {
+        core.info(`Tracker binary restored from Actions cache (digest ${digest})`);
+        fs.chmodSync(TRACKER_PATH, 0o755);
+        return 'cache';
+      }
+    } catch (err) {
+      core.warning(`Actions cache restore failed: ${err.message}`);
+    }
+  }
+
+  // Pull by digest when we have one, so the binary we run is exactly the one
+  // we cache — even if the tag moves between resolve and pull.
+  const pullRef = digest ? `${IMAGE_REPO}@${digest}` : image;
+  core.info(`Pulling eBPF tracker binary from ${pullRef}`);
+  await exec.exec('oras', ['pull', pullRef, '--output', '/tmp']);
+
+  // The artifact is pushed as a single file named 'ebpf-tracker'.
+  fs.chmodSync(TRACKER_PATH, 0o755);
+  core.info('Tracker binary ready at ' + TRACKER_PATH);
+
+  if (cacheKey) {
+    try {
+      await cache.saveCache([TRACKER_PATH], cacheKey);
+      core.info(`Tracker binary saved to Actions cache (key: ${cacheKey})`);
+    } catch (err) {
+      core.warning(`Actions cache save failed: ${err.message}`);
+    }
+  }
+  return 'pull';
+}
 
 /**
  * Poll until the tracker has written its PID file, or the timeout expires.
@@ -45,28 +185,11 @@ async function run() {
     core.saveState('OUTPUT_MODE', outputMode);
     core.saveState('S3_BUCKET', s3Bucket);
 
-    // Install ORAS CLI if not already on PATH.
-    let orasPath = 'oras';
-    try {
-      await exec.exec('oras', ['version'], { silent: true });
-    } catch {
-      core.info('ORAS not found on PATH; downloading...');
-      const ORAS_VERSION = '1.2.3';
-      const url = `https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz`;
-      const tarball = await tc.downloadTool(url);
-      const extractedDir = await tc.extractTar(tarball);
-      orasPath = path.join(extractedDir, 'oras');
-      core.addPath(extractedDir);
-      core.info(`ORAS installed at ${orasPath}`);
-    }
+    const orasSource = await installOras();
+    core.setOutput('oras-source', orasSource);
 
-    // Pull the binary artifact from ghcr.io using ORAS CLI.
-    core.info(`Pulling eBPF tracker binary from ${IMAGE}`);
-    await exec.exec('oras', ['pull', IMAGE, '--output', '/tmp']);
-
-    // The artifact is pushed as a single file named 'ebpf-tracker'.
-    fs.chmodSync(TRACKER_PATH, 0o755);
-    core.info('Tracker binary ready at ' + TRACKER_PATH);
+    const trackerSource = await installTracker(resolveVersion());
+    core.setOutput('tracker-source', trackerSource);
 
     // The tracker must run as root so that monitored code (potentially
     // malicious third-party actions) cannot kill it. Ubuntu 24.04 enables

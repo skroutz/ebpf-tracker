@@ -1,7 +1,8 @@
-const core = require('@actions/core');
-const exec = require('@actions/exec');
-const fs = require('fs');
-const dns = require('dns');
+import * as core from '@actions/core';
+import * as exec from '@actions/exec';
+import fs from 'fs';
+import dns from 'dns';
+import { execSync } from 'child_process';
 
 const EVENTS_FILE = '/tmp/ebpf-network-events.json';
 const SHUTDOWN_TIMEOUT_MS = 15000;
@@ -12,7 +13,6 @@ function isAlive() {
   // PID belongs to the sudo parent (root-owned), so kill(pid, 0) always returns
   // EPERM while sudo is alive — even after the tracker child has already exited.
   try {
-    const { execSync } = require('child_process');
     const out = execSync('pgrep -x ebpf-tracker 2>/dev/null || true').toString().trim();
     return out.length > 0;
   } catch {
@@ -73,7 +73,6 @@ async function resolveEventDomains(events) {
 // `sudo tee` rather than writing directly with fs.writeFileSync.
 function writeEventsNDJSON(filePath, events) {
   try {
-    const { execSync } = require('child_process');
     const content = events.map((e) => JSON.stringify(e)).join('\n') + '\n';
     execSync(`sudo tee "${filePath}" > /dev/null`, { input: content });
   } catch (err) {

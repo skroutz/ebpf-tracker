@@ -3,6 +3,10 @@ description: 'Tracks all TCP/UDP connections on the GitHub Runner via eBPF and u
 author: 'skroutz'
 
 inputs:
+  version:
+    description: 'Explicit override for the tag of the ebpf-tracker binary artifact to pull from ghcr.io (e.g. "v1.2.0" or "latest"). When unset, the tag is resolved from the action ref (GITHUB_ACTION_REF), so `uses: skroutz/ebpf-tracker@v1.2.0` pulls the v1.2.0 binary. The tag is resolved to its manifest digest, so a cached binary is reused only while the tag still points to the same content.'
+    required: false
+    default: ''
   s3-bucket:
     description: 'S3 bucket name where the network event log will be uploaded (required when output is s3)'
     required: false
@@ -18,6 +22,12 @@ inputs:
     description: 'Poll /proc/net every 200 ms to capture connections established before the tracker step started (e.g. OIDC credential calls, git fetch). Set to "false" to disable.'
     required: false
     default: 'true'
+
+outputs:
+  oras-source:
+    description: 'Where the ORAS CLI came from: "path", "tool-cache", "cache" (Actions cache) or "download"'
+  tracker-source:
+    description: 'Where the tracker binary came from: "cache" (Actions cache) or "pull" (fresh oras pull)'
 
 runs:
   using: 'node24'
