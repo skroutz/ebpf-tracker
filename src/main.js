@@ -8,7 +8,11 @@ const path = require('path');
 const TRACKER_PATH = '/tmp/ebpf-tracker';
 const PID_FILE = '/tmp/ebpf-tracker.pid';
 const EVENTS_FILE = '/tmp/ebpf-network-events.json';
-const IMAGE = 'ghcr.io/skroutz/ebpf-tracker:latest';
+// Resolve the binary tag from the action ref so that
+// `uses: skroutz/ebpf-tracker@v1.2.3` always pulls the v1.2.3 binary.
+// Falls back to 'latest' when run outside of Actions (e.g. local testing).
+const actionRef = process.env.GITHUB_ACTION_REF || 'latest';
+const IMAGE = `ghcr.io/skroutz/ebpf-tracker:${actionRef}`;
 
 /**
  * Poll until the tracker has written its PID file, or the timeout expires.

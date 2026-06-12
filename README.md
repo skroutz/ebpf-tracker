@@ -156,6 +156,7 @@ permissions:
 │   └── go.mod
 └── .github/workflows/
     ├── build-and-publish.yml           # Builds binary, pushes to ghcr.io
+    ├── check-dist.yml                  # Verifies dist/ is up-to-date on PRs
     └── test-tracker.yml                # End-to-end test on a real runner
 ```
 
@@ -196,7 +197,7 @@ npm run build
 
 ## CI/CD
 
-Pushing to `main` (excluding changes to `test-tracker.yml`) triggers `.github/workflows/build-and-publish.yml`, which runs two isolated jobs:
+Pushing to `main` (excluding changes to `test-tracker.yml`) or to a `v*` tag triggers `.github/workflows/build-and-publish.yml`:
 
 **`build`** (`permissions: contents: read, packages: write`):
 1. Generates `vmlinux.h` from the runner kernel's BTF
@@ -204,12 +205,47 @@ Pushing to `main` (excluding changes to `test-tracker.yml`) triggers `.github/wo
 3. Runs unit tests (`go test ./internal/...`)
 4. Builds a fully static Go binary (`CGO_ENABLED=0`)
 5. Pushes the binary to `ghcr.io/skroutz/ebpf-tracker:latest` as an OCI artifact via [ORAS](https://oras.land)
-6. Builds the Node.js action dist and uploads it as a workflow artifact
+6. Rebuilds the Node.js action dist and verifies it compiles cleanly
 
-**`publish-dist`** (`permissions: contents: write`):
-7. Downloads the dist artifact and commits it back to `main`
+`.github/workflows/check-dist.yml` runs on every PR and push to `main` to ensure the checked-in `dist/` matches what `npm run build` produces. PRs that modify `src/` **must** include a rebuilt `dist/`.
 
-The jobs are intentionally split so the build environment (which runs untrusted external tools) cannot push directly to the repository.
+## Contributing
+
+### Workflow
+
+1. Fork the repo and create a feature branch off `main`.
+2. Make your changes.
+3. If you touched anything under `src/`, rebuild the action dist and include it in your commit:
+   ```bash
+   npm install
+   npm run build
+   git add dist/
+   ```
+   The `check-dist` CI job will fail the PR if `dist/` is out of sync.
+4. If you touched anything under `tracker/`, run the unit tests locally:
+   ```bash
+   cd tracker
+   go test ./internal/...
+   ```
+5. Open a pull request against `main`.
+
+### Releasing
+
+The `dist/` directory must be committed **before** tagging. The tag points to a commit that already contains the built dist — CI does not commit it back automatically.
+
+```bash
+# 1. Rebuild and commit dist
+npm run build
+git add dist/
+git commit -m "chore: rebuild dist for vX.Y.Z"
+git push
+
+# 2. Tag
+git tag vX.Y.Z
+git push --tags
+```
+
+Pushing the tag triggers the `build-and-publish` workflow which publishes the new Go binary to `ghcr.io/skroutz/ebpf-tracker:latest`.
 
 ## Requirements
 

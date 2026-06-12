@@ -2,7 +2,7 @@
 
 // Network connection tracker using eBPF CO-RE. Writes JSONL to /tmp/ebpf-network-events.json.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86" NetworkTracker ../bpf/network_tracker.c -- -I../bpf
+//go:generate go tool bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86" NetworkTracker ../bpf/network_tracker.c -- -I../bpf
 package main
 
 import (
