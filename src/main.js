@@ -4,15 +4,33 @@ const tc = require('@actions/tool-cache');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const TRACKER_PATH = '/tmp/ebpf-tracker';
 const PID_FILE = '/tmp/ebpf-tracker.pid';
 const EVENTS_FILE = '/tmp/ebpf-network-events.json';
+const ORAS_VERSION = '1.2.3';
+const ORAS_FILENAME = `oras_${ORAS_VERSION}_linux_amd64.tar.gz`;
+const ORAS_LINUX_AMD64_SHA256 = 'b4efc97a91f471f323f193ea4b4d63d8ff443ca3aab514151a30751330852827';
 // Resolve the binary tag from the action ref so that
 // `uses: skroutz/ebpf-tracker@v1.2.3` always pulls the v1.2.3 binary.
 // Falls back to 'latest' when run outside of Actions (e.g. local testing).
 const actionRef = process.env.GITHUB_ACTION_REF || 'latest';
 const IMAGE = `ghcr.io/skroutz/ebpf-tracker:${actionRef}`;
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+function verifyOrasTarball(tarball) {
+  const actual = sha256File(tarball);
+  if (actual !== ORAS_LINUX_AMD64_SHA256) {
+    throw new Error(
+      `ORAS checksum verification failed: expected ${ORAS_LINUX_AMD64_SHA256}, got ${actual}`,
+    );
+  }
+  core.info(`Verified ORAS ${ORAS_VERSION} checksum (${actual})`);
+}
 
 /**
  * Poll until the tracker has written its PID file, or the timeout expires.
@@ -51,9 +69,9 @@ async function run() {
       await exec.exec('oras', ['version'], { silent: true });
     } catch {
       core.info('ORAS not found on PATH; downloading...');
-      const ORAS_VERSION = '1.2.3';
-      const url = `https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz`;
+      const url = `https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${ORAS_FILENAME}`;
       const tarball = await tc.downloadTool(url);
+      verifyOrasTarball(tarball);
       const extractedDir = await tc.extractTar(tarball);
       orasPath = path.join(extractedDir, 'oras');
       core.addPath(extractedDir);
