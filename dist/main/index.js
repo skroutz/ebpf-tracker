@@ -34976,6 +34976,22 @@ const EVENTS_FILE = '/tmp/ebpf-network-events.json';
 const ORAS_VERSION = '1.2.3';
 const ORAS_FILENAME = `oras_${ORAS_VERSION}_linux_amd64.tar.gz`;
 const ORAS_LINUX_AMD64_SHA256 = 'b4efc97a91f471f323f193ea4b4d63d8ff443ca3aab514151a30751330852827';
+const AWS_ENV_STATE_PREFIX = 'AWS_ENV_';
+const AWS_ENV_NAMES = [
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_REGION',
+  'AWS_DEFAULT_REGION',
+  'AWS_PROFILE',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'AWS_CONFIG_FILE',
+];
+const AWS_SECRET_ENV_NAMES = new Set([
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+]);
 // Resolve the binary tag from the action ref so that
 // `uses: skroutz/ebpf-tracker@v1.2.3` always pulls the v1.2.3 binary.
 // Falls back to 'latest' when run outside of Actions (e.g. local testing).
@@ -34994,6 +35010,23 @@ function verifyOrasTarball(tarball) {
     );
   }
   core.info(`Verified ORAS ${ORAS_VERSION} checksum (${actual})`);
+}
+
+function saveAwsEnvState() {
+  let saved = 0;
+  for (const name of AWS_ENV_NAMES) {
+    const value = process.env[name];
+    if (!value) continue;
+    if (AWS_SECRET_ENV_NAMES.has(name)) {
+      core.setSecret(value);
+    }
+    core.saveState(`${AWS_ENV_STATE_PREFIX}${name}`, value);
+    saved += 1;
+  }
+
+  if (saved > 0) {
+    core.info('Captured AWS environment for post S3 upload');
+  }
 }
 
 /**
@@ -35026,6 +35059,9 @@ async function run() {
 
     core.saveState('OUTPUT_MODE', outputMode);
     core.saveState('S3_BUCKET', s3Bucket);
+    if (outputMode === 's3' && s3Bucket) {
+      saveAwsEnvState();
+    }
 
     // Install ORAS CLI if not already on PATH.
     let orasPath = 'oras';
