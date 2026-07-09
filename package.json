@@ -13,7 +13,7 @@
     "@actions/tool-cache": "^2.0.1"
   },
   "devDependencies": {
-    "@vercel/ncc": "^0.38.1"
+    "@vercel/ncc": "^0.38.4"
   },
   "overrides": {
     "@actions/http-client": "^3.0.2"

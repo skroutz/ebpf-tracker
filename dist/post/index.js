@@ -31716,14 +31716,83 @@ function parseEventsNDJSON(filePath) {
   }
 }
 
+// Collapse events into one row per distinct connection (same protocol,
+// source/destination IP, destination port+domain, process, UID, exit code) —
+// repeated connections (e.g. keep-alive requests with a new ephemeral source
+// port each time) differ only in timestamp/source port/pid, which is what's
+// aggregated here. Process/UID/exit code are kept as grouping keys (not
+// collapsed): exit code distinguishes a successful connection from a refused
+// one (must never merge into the same row), and process name is the signal
+// this tracker exists to surface — though process.name is attacker-settable
+// (prctl/argv0), so raw PIDs are also retained per group (see formatCompactSet)
+// as a kernel-verified identity that a spoofed comm name can't hide behind.
+// Returns groups sorted by count descending.
+function groupEvents(events) {
+  const groups = new Map();
+  for (const e of events) {
+    const protocol   = e.network?.protocol   || 'N/A';
+    const sourceIp   = e.source?.ip          || 'N/A';
+    const destIp     = e.destination?.ip     || 'N/A';
+    const destPort   = e.destination?.port   ?? 'N/A';
+    const destDomain = e.destination?.domain || 'N/A';
+    const proc       = e.process?.name       || 'N/A';
+    const uid        = e.user?.id            || 'N/A';
+    const exitCode   = e.process?.exit_code  ?? 'N/A';
+    const key = [protocol, sourceIp, destIp, destPort, destDomain, proc, uid, exitCode].join(' ');
+
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        protocol, sourceIp, destIp, destPort, destDomain, process: proc, uid, exitCode,
+        count: 0, srcPorts: new Set(), pids: new Set(), firstSeen: null, lastSeen: null,
+      };
+      groups.set(key, g);
+    }
+    g.count += 1;
+    if (e.source?.port !== undefined && e.source?.port !== null) g.srcPorts.add(e.source.port);
+    if (e.process?.pid !== undefined && e.process?.pid !== null) g.pids.add(e.process.pid);
+    const ts = e.timestamp;
+    if (ts) {
+      if (g.firstSeen === null || ts < g.firstSeen) g.firstSeen = ts;
+      if (g.lastSeen === null || ts > g.lastSeen) g.lastSeen = ts;
+    }
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count);
+}
+
+// Exact values for low-cardinality sets (source ports, PIDs); a count for the
+// rest, so the cell never becomes an unreadable pile of unrelated numbers.
+function formatCompactSet(values) {
+  if (values.size === 0) return 'N/A';
+  if (values.size <= 3) return [...values].sort((a, b) => a - b).join(', ');
+  return `${values.size} distinct`;
+}
+
+// Neutralizes markdown table-breaking characters in attacker-influenced
+// fields (process name is set via prctl/argv0; domain comes from a reverse-DNS
+// PTR record — both are outside our control) before they go into a table row.
+function escapeMdCell(value) {
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\r\n|\r|\n/g, ' ');
+}
+
+// Leaves headroom under GitHub's 1024 KiB step-summary hard limit.
+const STEP_SUMMARY_BUDGET_BYTES = 900 * 1024;
+
 // Write a markdown summary table to GITHUB_STEP_SUMMARY.
-function printStepSummary(events) {
+// `fullDataLocation` (an S3 URI or "the job log") is referenced if the table
+// still has to be cut down to fit the size limit.
+function printStepSummary(events, fullDataLocation) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryPath) return;
 
   const repo     = process.env.GITHUB_REPOSITORY || 'N/A';
   const workflow = process.env.GITHUB_WORKFLOW   || 'N/A';
   const runId    = process.env.GITHUB_RUN_ID     || 'N/A';
+
+  const groups = groupEvents(events);
 
   // Aggregate stats.
   const uniqueDsts = new Set(events.map((e) => e.destination?.ip)).size;
@@ -31744,44 +31813,60 @@ function printStepSummary(events) {
     '| Repository | Workflow | Run ID |\n' +
     '| --- | --- | --- |\n' +
     `| ${repo} | ${workflow} | ${runId} |\n\n` +
-    '| Total Events | Unique Destination IPs | Protocols |\n' +
-    '| --- | --- | --- |\n' +
-    `| ${events.length} | ${uniqueDsts} | ${protoLine} |\n\n` +
+    '| Total Events | Unique Connections | Unique Destination IPs | Protocols |\n' +
+    '| --- | --- | --- | --- |\n' +
+    `| ${events.length} | ${groups.length} | ${uniqueDsts} | ${protoLine} |\n\n` +
     '---\n\n';
 
-  // Connection table.
+  // Connection table: one row per distinct connection, not per raw event.
   const columns = [
-    'Timestamp', 'Protocol',
-    'Source IP', 'Src Port',
-    'Destination IP', 'Dst Port', 'Dst Domain',
-    'PID', 'Process', 'UID',
+    'Protocol', 'Source IP', 'Destination IP', 'Dst Port', 'Dst Domain',
+    'Process', 'PIDs', 'UID', 'Exit Code', 'Count', 'Src Ports',
+    'First Seen (UTC)', 'Last Seen (UTC)',
   ];
-
-  const mdRows = [];
-  mdRows.push(`| ${columns.join(' | ')} |`);
-  mdRows.push(`| ${columns.map(() => '---').join(' | ')} |`);
-
-  for (const e of events) {
+  const headerLines = [
+    `| ${columns.join(' | ')} |`,
+    `| ${columns.map(() => '---').join(' | ')} |`,
+  ];
+  const rowLines = groups.map((g) => {
     const row = [
-      e.timestamp                  || 'N/A',
-      e.network?.protocol          || 'N/A',
-      e.source?.ip                 || 'N/A',
-      e.source?.port               ?? 'N/A',
-      e.destination?.ip            || 'N/A',
-      e.destination?.port          ?? 'N/A',
-      e.destination?.domain        || 'N/A',
-      e.process?.pid               ?? 'N/A',
-      e.process?.name              || 'N/A',
-      e.user?.id                   || 'N/A',
-    ];
-    mdRows.push(`| ${row.join(' | ')} |`);
+      g.protocol, g.sourceIp, g.destIp, g.destPort, g.destDomain,
+      g.process, formatCompactSet(g.pids), g.uid, g.exitCode, g.count,
+      formatCompactSet(g.srcPorts), g.firstSeen || 'N/A', g.lastSeen || 'N/A',
+    ].map(escapeMdCell);
+    return `| ${row.join(' | ')} |`;
+  });
+
+  const sectionHeader = '## Network Events\n\n';
+  const footer = '\n\n---\n';
+
+  // Safety net: only trims in genuinely high-cardinality cases (e.g. many
+  // one-off unique destinations), since grouping already collapses repeats.
+  const fixedBytes = Buffer.byteLength(
+    metadataMd + sectionHeader + headerLines.join('\n') + '\n' + footer, 'utf8',
+  );
+  const budgetForRows = STEP_SUMMARY_BUDGET_BYTES - fixedBytes;
+
+  let usedBytes = 0;
+  const includedRows = [];
+  for (const line of rowLines) {
+    const lineBytes = Buffer.byteLength(line + '\n', 'utf8');
+    if (usedBytes + lineBytes > budgetForRows) break;
+    includedRows.push(line);
+    usedBytes += lineBytes;
   }
+
+  const omittedCount = rowLines.length - includedRows.length;
+  const truncationNote = omittedCount > 0
+    ? `\n> ${omittedCount} of ${rowLines.length} connections omitted to stay under the step summary size limit — full data is in ${fullDataLocation}.\n`
+    : '';
 
   try {
     fs.appendFileSync(summaryPath, metadataMd);
-    fs.appendFileSync(summaryPath, '## Network Events\n\n');
-    fs.appendFileSync(summaryPath, mdRows.join('\n'));
-    fs.appendFileSync(summaryPath, '\n\n---\n');
+    fs.appendFileSync(summaryPath, sectionHeader);
+    fs.appendFileSync(summaryPath, [...headerLines, ...includedRows].join('\n'));
+    fs.appendFileSync(summaryPath, truncationNote);
+    fs.appendFileSync(summaryPath, footer);
   } catch (err) {
     core.warning(`Could not write step summary: ${err.message}`);
   }
@@ -31828,12 +31913,25 @@ async function run() {
     return;
   }
 
+  // Compute the S3 destination up front (pure string-building, no I/O) so the
+  // step summary can name it if its connection table has to be truncated.
+  let s3Uri = null;
+  if (s3Bucket) {
+    const repo = process.env.GITHUB_REPOSITORY || 'unknown-repo';
+    const workflow = process.env.GITHUB_WORKFLOW || 'unknown-workflow';
+    const runId = process.env.GITHUB_RUN_ID || 'unknown-run';
+    const workflowSlug = workflow.toLowerCase().replace(/[^a-z0-9-_]/g, '-');
+    const s3Key = `${repo}/${workflowSlug}/${runId}-network.json`;
+    s3Uri = `s3://${s3Bucket}/${s3Key}`;
+  }
+  const fullDataLocation = s3Uri ? `the uploaded artifact (\`${s3Uri}\`)` : 'the job log output for this step';
+
   // Resolve domains, enrich the artifact in-place, then print step summary.
   if (fs.existsSync(EVENTS_FILE)) {
     const events = parseEventsNDJSON(EVENTS_FILE);
     const enriched = await resolveEventDomains(events);
     writeEventsNDJSON(EVENTS_FILE, enriched);
-    printStepSummary(enriched);
+    printStepSummary(enriched, fullDataLocation);
   }
 
   if (!s3Bucket) {
@@ -31854,14 +31952,6 @@ async function run() {
     return;
   }
 
-  const repo = process.env.GITHUB_REPOSITORY || 'unknown-repo';
-  const workflow = process.env.GITHUB_WORKFLOW || 'unknown-workflow';
-  const runId = process.env.GITHUB_RUN_ID || 'unknown-run';
-
-  const workflowSlug = workflow.toLowerCase().replace(/[^a-z0-9-_]/g, '-');
-  const s3Key = `${repo}/${workflowSlug}/${runId}-network.json`;
-  const s3Uri = `s3://${s3Bucket}/${s3Key}`;
-
   core.info(`Uploading ${EVENTS_FILE} to ${s3Uri}`);
 
   try {
@@ -31873,7 +31963,9 @@ async function run() {
     ], { env: buildS3UploadEnv() });
     core.info('Upload complete');
     try {
-      fs.unlinkSync(EVENTS_FILE);
+      // EVENTS_FILE is root-owned (written via `sudo tee`) and /tmp has the
+      // sticky bit set, so only root can unlink it
+      await exec.exec('sudo', ['rm', '-f', EVENTS_FILE]);
     } catch (cleanupErr) {
       core.warning(`Could not delete ${EVENTS_FILE}: ${cleanupErr.message}`);
     }
