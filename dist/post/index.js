@@ -31572,6 +31572,22 @@ const dns = __nccwpck_require__(2250);
 const EVENTS_FILE = '/tmp/ebpf-network-events.json';
 const SHUTDOWN_TIMEOUT_MS = 15000;
 const POLL_INTERVAL_MS = 100;
+const AWS_ENV_STATE_PREFIX = 'AWS_ENV_';
+const AWS_ENV_NAMES = [
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_REGION',
+  'AWS_DEFAULT_REGION',
+  'AWS_PROFILE',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'AWS_CONFIG_FILE',
+];
+const AWS_SECRET_ENV_NAMES = new Set([
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+]);
 
 function isAlive() {
   // Check by process name: this is the only reliable signal because the saved
@@ -31584,6 +31600,42 @@ function isAlive() {
   } catch {
     return false;
   }
+}
+
+function getSavedAwsEnv() {
+  const savedEnv = {};
+  for (const name of AWS_ENV_NAMES) {
+    const value = core.getState(`${AWS_ENV_STATE_PREFIX}${name}`);
+    if (!value) continue;
+    if (AWS_SECRET_ENV_NAMES.has(name)) {
+      core.setSecret(value);
+    }
+    savedEnv[name] = value;
+  }
+  return savedEnv;
+}
+
+function hasSavedAwsCredentialSource(savedAwsEnv) {
+  return (
+    (savedAwsEnv.AWS_ACCESS_KEY_ID && savedAwsEnv.AWS_SECRET_ACCESS_KEY) ||
+    savedAwsEnv.AWS_PROFILE
+  );
+}
+
+function buildS3UploadEnv() {
+  const savedAwsEnv = getSavedAwsEnv();
+  if (!hasSavedAwsCredentialSource(savedAwsEnv)) {
+    return process.env;
+  }
+
+  const uploadEnv = { ...process.env };
+  for (const name of AWS_ENV_NAMES) {
+    delete uploadEnv[name];
+    delete uploadEnv[`STATE_${AWS_ENV_STATE_PREFIX}${name}`];
+  }
+  Object.assign(uploadEnv, savedAwsEnv);
+  core.info('Using captured AWS environment for S3 upload');
+  return uploadEnv;
 }
 
 async function waitForExit() {
@@ -31818,7 +31870,7 @@ async function run() {
       EVENTS_FILE,
       s3Uri,
       '--content-type', 'application/x-ndjson',
-    ]);
+    ], { env: buildS3UploadEnv() });
     core.info('Upload complete');
     try {
       fs.unlinkSync(EVENTS_FILE);
