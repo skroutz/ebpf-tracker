@@ -201,7 +201,7 @@ Pushing to `main` (excluding changes to `test-tracker.yml`) or to a `v*` tag tri
 
 **`build`** (`permissions: contents: read, packages: write`):
 1. Generates `vmlinux.h` from the runner kernel's BTF
-2. Compiles the C eBPF program and generates the Go skeleton via `bpf2go@v0.21.0`
+2. Compiles the C eBPF program and generates the Go skeleton via `bpf2go@v0.22.0`
 3. Runs unit tests (`go test ./internal/...`)
 4. Builds a fully static Go binary (`CGO_ENABLED=0`)
 5. Pushes the binary to `ghcr.io/skroutz/ebpf-tracker:latest` as an OCI artifact via [ORAS](https://oras.land)
